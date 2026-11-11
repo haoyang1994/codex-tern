@@ -1,4 +1,5 @@
 import { NATIVE_ABI_VERSION } from './native-abi';
+import { installContextUsage, contextUsageLabel, type ContextUsageStore } from './context-usage';
 /** @jsxImportSource @stencil-hq/tern */
 import { translate, isLanguage } from './i18n';
 import { css, html, Node, type Session, type Surface, type PickerItem, type Key } from '@stencil-hq/tern';
@@ -52,7 +53,7 @@ const styles = css`
   .ct-activity-preview { margin: 2px 0 5px 20px; padding-left: 10px; border-left: 1px solid var(--l2); }
   .ct-activity-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ct-activity-output { font: var(--sf-fs)/var(--sf-grid-lh) var(--tv-font, var(--mono)); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; max-height: 4.5em; overflow: hidden; }
-  [data-role="ct.turn.result"] { width: 100%; max-width: 736px; margin-left: auto; margin-right: auto; }
+  [data-role="ct.turn.result"] { width: 100%; height: 1px; min-height: 1px; margin: 0; padding: 0; pointer-events: none; }
   [data-role="omp.user.images"] { min-width: 0; align-items: flex-start; }
   [data-role="omp.user.images"] .sf-image { max-width: 100%; border-radius: 8px; overflow: hidden; }
   [data-role="omp.user.images"] .sf-image img { display: block; max-width: 100%; height: auto; object-fit: contain; }
@@ -65,6 +66,7 @@ export type NativeUIState = ReturnType<NativeUI['reloadState']>;
 export class NativeUI {
   private readonly clientInstance = randomUUID();
   private chiefGuard?: ChiefGuard;
+  private contextUsage: ContextUsageStore;
   private reservedChief: string | null = null;
   private sidebarRequested = false;
   private composer = new Composer();
@@ -141,6 +143,7 @@ export class NativeUI {
 
   constructor(readonly c: Controller, readonly session: Session, readonly surface: Surface,
     readonly enhanced?: EnhancedPasteController, readonly clipboardInput?: ClipboardInput, state?: NativeUIState) {
+    this.contextUsage = installContextUsage(c.rpc);
     this.applyStyles();
     this.projectDirectory = c.cwd;
     this.folderSessions = new FolderSessions(c, () => this.schedule());
@@ -325,7 +328,7 @@ export class NativeUI {
   };
   private onCompletion = (event: Completion) => {
     if (this.ended) return;
-    if (this.c.notifications) {
+    if (this.c.notifications && (event.threadId !== this.c.thread?.id || !this.visible)) {
       this.completion = event;
       if (this.completionTimer) clearTimeout(this.completionTimer);
       this.completionTimer = setTimeout(() => { this.completion = undefined; this.schedule(); }, 8000);
@@ -749,25 +752,37 @@ export class NativeUI {
     const live = latest && this.c.activeTurn === part.turnId;
     // A completed turn gets a new default. Opening details during a run never
     // leaves command output expanded after the turn ends.
-    const key = `${part.id}:${live ? 'live' : 'ended'}`;
+    const key = `${part.id}:${turn?.status === 'completed' ? 'completed' : live ? 'live' : 'ended'}`;
     const mode = this.activityModes.get(key) ?? 'collapsed';
     const errors = part.entries.some(({ item }) => ('status' in item && (item.status === 'failed' || item.status === 'declined'))
       || (item.type === 'commandExecution' && item.exitCode != null && item.exitCode !== 0));
     const state = live ? this.c.requests.length ? 'Needs input' : 'Activity' : turn?.status === 'interrupted' ? 'Stopped'
       : turn?.status === 'failed' ? 'Failed' : this.c.connection === 'disconnected' && part.entries.some(e => !e.done) ? 'Disconnected' : 'Worked';
     const duration = !live && turn?.durationMs != null ? ` for ${Math.max(1, Math.round(turn.durationMs / 1000))}s` : '';
+    const completed = turn?.status === 'completed';
+    const seconds = turn?.durationMs != null && Number.isFinite(turn.durationMs)
+      ? Math.max(1, Math.round(turn.durationMs / 1000)) : null;
+    const elapsed = seconds === null ? '' : [seconds >= 3600 && `${Math.floor(seconds / 3600)}h`,
+      seconds >= 60 && `${Math.floor(seconds / 60) % 60}m`, `${seconds % 60}s`].filter(Boolean).join(' ');
+    const compactLabel = elapsed ? `${this.t('Took')} ${elapsed}` : this.t('View activity');
     const summary = activitySummary(part.entries);
     const label = `${state}${duration}${summary ? ` · ${summary}` : ''}${errors ? ' · has errors' : ''}`;
     return <html.div key={`activity-${part.id}`} class="ct-activity">
-      <html.button key="toggle" class="ct-activity-toggle" title={this.t(label)} aria={this.t(`${mode === 'expanded' ? 'Hide' : 'Show'} activity details · ${label}`)}
+      <html.button key="toggle" class={`ct-activity-toggle${completed ? ' ct-activity-toggle-quiet' : ''}`}
+        title={this.t(label)} aria={this.t(`${mode === 'expanded' ? 'Hide' : 'Show'} activity details · ${label}`)}
         attrs={{ 'aria-expanded': mode === 'expanded' }}
         onClick={() => {
           if (mode === 'expanded') for (const entry of part.entries) this.activityModes.delete(this.commandModeKey(entry));
           this.activityModes.set(key, mode === 'expanded' ? 'collapsed' : 'expanded'); this.render();
         }}>
-        <text key="state" role="ct.activity.state" text={this.t(state)} />
-        {(state === 'Failed' || state === 'Disconnected' || errors) && <icon key="error" name="warn" />}
-        <icon key="chevron" role="ct.activity.chevron" name={mode === 'expanded' ? 'chev' : 'chev-r'} />
+        {completed ? <>
+          <text key="state" role="ct.activity.state" text={compactLabel} />
+          <icon key="chevron" role="ct.activity.chevron" name={mode === 'expanded' ? 'chev' : 'chev-r'} />
+        </> : <>
+          <text key="state" role="ct.activity.state" text={this.t(state)} />
+          {(state === 'Failed' || state === 'Disconnected' || errors) && <icon key="error" name="warn" />}
+          <icon key="chevron" role="ct.activity.chevron" name={mode === 'expanded' ? 'chev' : 'chev-r'} />
+        </>}
       </html.button>
       {mode === 'expanded' && <col key="details" role="ct.activity.details" gap="sm">{part.entries.map(e => this.renderItem(e))}</col>}
     </html.div>;
@@ -916,7 +931,9 @@ export class NativeUI {
     const hasInput = !!this.draft.submittedText.trim() || (!this.answerTarget && this.images.length > 0);
     const sendEnabled = !this.panel && !this.draft.completing && hasInput;
     const displayModel = c.models.find(m => m.model === c.model)?.displayName ?? c.model;
-    const parts = transcriptParts(c.items);
+    const context = contextUsageLabel(this.contextUsage.get(c.thread?.id), c.preferences.language);
+    const parts = transcriptParts(c.items, new Set([...c.turns.values()]
+      .filter(turn => turn.status === 'completed').map(turn => turn.id)));
     const result = c.thread ? c.sessionResult(c.thread.id) : undefined;
     const latestActivity = parts.findLast(p => p.kind === 'activity' && p.turnId === c.activeTurn);
     // Each message stays in its own direct block for native virtualization.
@@ -937,9 +954,7 @@ export class NativeUI {
         {c.notices.filter(n => n.error).map(n => <card key={`notice${n.id}`} role="omp.error" tone="error" head={this.t("Error")}>
           <text text={this.t(n.text)} />{this.button('Dismiss', () => { c.notices = c.notices.filter(x => x.id !== n.id); c.changed(); })}
         </card>)}
-        {result && <text key={`result:${result.turnId}`}
-          role="ct.turn.result" tone="muted" onClick={() => this.noteInteraction()}
-          text={this.t(result.status === 'failed' ? 'Task failed' : 'Task complete')} />}
+        {result && <html.div key={`result:${result.turnId}`} role="ct.turn.result" attrs={{ 'aria-hidden': true }} />}
       </col> as Node;
     this.readingPositions.nodes = main.children.map((node, i) => `main.${node.props.key ?? i}`);
     const prompts = new Map(c.items.filter(entry => entry.item.type === 'userMessage').map(entry => [
@@ -952,7 +967,7 @@ export class NativeUI {
     this.surface.render(this.rendered = { main,
       dock: <col>
         {this.renderSessionBridge()}
-        {this.completion && <row key="completion" role="ct.completion" gap="sm" align="center">
+        {this.completion && this.completion.threadId !== c.thread?.id && <row key="completion" role="ct.completion" gap="sm" align="center">
           <icon key="icon" name={this.completion.status === 'completed' ? 'check' : 'warn'} role="ct.completion.icon" />
           <text key="label" grow={1} lines={1} text={`${this.completion.status === 'completed' ? this.t('Task complete') : this.t('Task failed')}${this.completion.threadId === c.thread?.id ? '' : ` · ${this.completion.title}`}`} />
           {this.completion.threadId !== c.thread?.id && <html.button key="view" class="ct-completion-action" onClick={() => {
@@ -1052,6 +1067,7 @@ export class NativeUI {
                 icon={c.connection === 'ready' ? undefined : c.connection === 'disconnected' ? 'error' : 'clock'}>
                 {c.connection === 'ready' ? this.t(c.account) : c.connection === 'disconnected' ? this.t("Disconnected") : this.t("Connecting…")}
               </seg>
+              <seg key="context" role="ct.context.usage" priority={5} title={context.title}>{context.text}</seg>
               {c.notices.some(n => !n.error) && <seg key="notice" icon="info" title={this.t("Codex notices")} onClick={() => this.openPanel('details')}>{this.t("Notice")}</seg>}
             </status>
             {(c.operation || !!this.pasting) && <row key="working" role="ct.working" gap="xs" align="center">

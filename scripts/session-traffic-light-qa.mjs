@@ -13,6 +13,7 @@ await writeFile(resolve(config, 'plugins/codex-tern.path'), resolve(root, 'tern-
 const env = { ...process.env, TERN_CONFIG_DIR: config, TERN_DAEMON_SOCKET: resolve(out, 'daemon.sock'),
   XDG_CACHE_HOME: resolve(out, 'cache'), XDG_STATE_HOME: resolve(out, 'state'), WB_DATA_DIR: resolve(out, 'workbench'), CODEX_TERN_WEIXIN_DISABLE: '1' };
 delete env.TERN_WINDOW_KEY; delete env.TERN_WINDOW_SOCKET;
+execFileSync('tern', ['plugin', 'link', resolve(root, 'tern-plugin')], { env, encoding: 'utf8' });
 const fd = openSync(resolve(out, 'tern.log'), 'w');
 const daemon = spawn('tern', ['daemon', '--socket', env.TERN_DAEMON_SOCKET], { env, stdio: ['ignore', fd, fd] });
 let server; const passed = [], screenshots = [], limitations = [];
@@ -26,27 +27,36 @@ const tree = sel => ctl(`tree ${sel}`).nodes ?? [];
 async function wait(fn, label) { for (let i = 0; i < 60; i++) { if (fn()) return; await pause(100); } throw Error(`Isolated environment unavailable: ${label}`); }
 const shot = name => { const r = ctl(`shot ${name}`); screenshots.push(r); return r; };
 const layers = async shot => (JSON.parse(await readFile(shot.layout, 'utf8')).elements ?? [])
-  .filter(e => /ct-lamp-lit/.test(e.path)).map(e => ({ path: e.path, opacity: Number(e.opacity), background: e.backgroundColor, rect: e.rect }));
+  .filter(e => /ct-session-traffic/.test(e.path)).map(e => ({ path: e.path, opacity: Number(e.opacity), background: e.backgroundColor, rect: e.rect }));
 try {
   await wait(() => existsSync(env.TERN_DAEMON_SOCKET), 'private daemon');
   server = spawn('tern', ['serve', '--control', control, '--out', out, '--cwd', root], { env, stdio: ['ignore', fd, fd] });
   await wait(() => existsSync(control), 'private offscreen renderer');
   const source = await readFile(resolve(root, 'tern-plugin/window.luau'), 'utf8');
-  const view = source.match(/local function view\(snapshot, selection, reveals\)[\s\S]*?(?=local function paint\()/)?.[0];
+  const viewSource = await readFile(resolve(root, 'tern-plugin/sessions-view.luau'), 'utf8');
+  const view = viewSource.slice(viewSource.indexOf('return function(')).replace('return function(', 'local function view(');
   assert.ok(view, 'load exact production view');
+  const traffic = await readFile(resolve(root, 'tern-plugin/traffic-light.luau'), 'utf8');
   const translations = await readFile(resolve(root, 'tern-plugin/i18n.luau'), 'utf8');
   const base = { locked: false, canArchive: true, pinned: false, time: '固定状态预览', running: false, waiting: false, permission: false, completed: false, failed: false };
-  const snapshot = { cwd: '三灯条预览（固定数据）', current: 'read', canSwitch: true, connected: true,
+  const snapshot = { cwd: '单灯预览（合成数据）', current: 'read', canSwitch: true, connected: true,
     archiveProtocol: 1, pinProtocol: 1, language: 'zh-CN', rows: [
       { ...base, id: 'working', title: '核查 pre01 发布准备', running: true },
       { ...base, id: 'waiting', title: '等待用户回答 · 黄灯', waiting: true, running: true },
       { ...base, id: 'permission', title: '等待权限确认 · 红灯', waiting: true, permission: true, running: true },
       { ...base, id: 'complete', title: '任务完成 · 尚未读取结果', completed: true, pinned: true },
       { ...base, id: 'failed', title: '执行失败 · 请查看原会话', failed: true },
-      { ...base, id: 'read', title: '结果已读 · 三灯全灭' },
+      { ...base, id: 'read', title: '结果已读 · 灰灯' },
+      { ...base, id: 'locked', title: '其他客户端占用 · 灰灯', locked: true, running: true },
       { ...base, id: 'long', title: '长标题：配置远程仓库并核验状态，星标、关闭与切换位置保持可用', running: true },
     ] };
-  const code = `local translate=(function()\n${translations}\nend)()\n${view}\nlocal s=tern.json.decode(${JSON.stringify(JSON.stringify(snapshot))})\nlocal original=cx.session:focused()\nlocal p=cx.canvas:open({title="三灯条预览（固定数据）", view=view(s,nil,nil),about="codex-tern.traffic-preview/v1",how="beside",focus=true})\nif p and original then cx.layout:close(original) end\nreturn p`;
+  const prefix = `local translate=(function()\n${translations}\nend)()\nlocal traffic=(function()\n${traffic}\nend)()\n${view}`;
+  const code = `${prefix}\nlocal s=tern.json.decode(${JSON.stringify(JSON.stringify(snapshot))})\nlocal original=cx.session:focused()\nlocal p=cx.canvas:open({title="单灯预览（合成数据）", view=view(s,nil,nil),about="codex-tern.traffic-preview/v1",how="beside",focus=true})\nif p and original then cx.layout:close(original) end\nreturn p`;
+  const render = async () => {
+    const code = `${prefix}\nlocal s=tern.json.decode(${JSON.stringify(JSON.stringify(snapshot))})\nfor _,p in cx.canvas:list() do if p.about=="codex-tern.traffic-preview/v1" then cx.canvas:set(p.pane,{view=view(s,nil,nil)}) end end`;
+    ctl(`carly lua ${JSON.stringify(code)}`);
+    await wait(() => tree('.ct-session-working').length === snapshot.rows.filter(r => r.running && !r.waiting && !r.locked).length, 'snapshot frame');
+  };
   ctl('resize 580 420');
   const cssResult = ctl('css codex-traffic-preview '+resolve(root, 'tern-plugin/sessions.css'));
   const unrelated = (cssResult.errors ?? []).filter(e => e.message === 'unexpected Ident("fit-content") in `width: fit-content;`');
@@ -54,41 +64,43 @@ try {
   assert.deepEqual((cssResult.errors ?? []).filter(e => !unrelated.includes(e)), [], 'traffic-light rules must compile');
   ctl(`carly lua ${JSON.stringify(code)}`);
   ctl('wait 6000');
-  await wait(() => tree('[data-role="codex-tern.sessions.item"]').length === 7, 'production component preview');
+  await wait(() => tree('[data-role="codex-tern.sessions.item"]').length === 8, 'production component preview');
   const rows = tree('[data-role="codex-tern.sessions.item"]');
   assert.ok(rows.every(n => n.rect[3] <= 34), 'compact row heights');
-  assert.equal(tree('.ct-session-traffic').length, 7);
-  assert.equal(tree('.ct-lamp').length, 21);
-  assert.equal(tree('.ct-session-dust').length, 0);
-  assert.equal(tree('[data-role="codex-tern.sessions.pin"]').length, 7);
-  assert.equal(tree('[data-role="codex-tern.sessions.archive"]').length, 7);
-  assert.ok(tree('.ct-session-traffic').every(n => n.rect[2] === 36 && n.rect[3] === 14), 'visible native lamp housings');
-  assert.ok(tree('.ct-lamp').every(n => n.rect[2] === 8 && n.rect[3] === 8), 'visible native lenses');
-  passed.push('production rows show seven real 36x14 three-lamp housings, keep compact height and star/close controls, remove background dust');
+  assert.equal(tree('.ct-session-traffic').length, 8);
+  assert.equal(tree('.ct-lamp').length, 0, 'no old three-lamp children');
+  assert.equal(tree('[data-role="codex-tern.sessions.pin"]').length, 8);
+  assert.equal(tree('[data-role="codex-tern.sessions.archive"]').length, 8);
+  assert.ok(tree('.ct-session-traffic').every(n => n.rect[2] === 8 && n.rect[3] === 8), 'one compact circular light per row');
+  const semantics = `local traffic=(function()\n${traffic}\nend)()\nlocal s={current="current"}\nassert(traffic.status(s,{id="other",locked=true,running=true})=="off")\nassert(traffic.status(s,{id="current",locked=true,running=true})=="working")\nassert(traffic.status(s,{running=true,completed=true})=="working","reading must not clear running")\nassert(traffic.status(s,{waiting=true,running=true})=="waiting")\nassert(traffic.status(s,{waiting=true,permission=true,running=true})=="permission")\nassert(traffic.status(s,{failed=true,completed=true})=="failed")\nassert(traffic.status(s,{completed=true})=="completed")\nassert(traffic.status(s,{})=="off")`;
+  ctl(`carly lua ${JSON.stringify(semantics)}`);
+  const accessibility = `${prefix}\nlocal s=tern.json.decode(${JSON.stringify(JSON.stringify(snapshot))})\nlocal v=view(s,nil,nil)\nfor i,item in s.rows do local light=v.c[i+2].c[1].c[1]; assert(light.p.aria and light.p.aria==light.p.title and light.p.attrs.role=="img"); assert(light.c==nil) end`;
+  ctl(`carly lua ${JSON.stringify(accessibility)}`);
+  assert.doesNotMatch(source, /light_timer|light_due|sync_lights|traffic\.lit|traffic\.next_delay/);
+  assert.doesNotMatch(traffic, /tern\.now|timer|period|next_delay|function traffic\.lit/);
+  const css = await readFile(resolve(root, 'tern-plugin/sessions.css'), 'utf8');
+  const lightCss = css.slice(css.indexOf('.ct-session-traffic {'), css.indexOf('.sf.sf-el[data-role="codex-tern.sessions.archive"]'));
+  assert.doesNotMatch(lightCss, /@keyframes|ct-session-lit|ct-lamp/);
+  assert.match(lightCss, /animation: none; transition: none;/);
+  passed.push('snapshot priority, running/read overlap, locked rows, tooltip and accessible names preserved; no light scheduler or phase logic');
   ctl('appearance dark'); ctl('reduce-motion off');
-  const frames = [];
-  for (const ms of [0, 250, 325, 500, 650, 750, 1000, 1500, 2000]) {
-    ctl('motion-at '+ms); const frame = shot('traffic-dark-'+ms);
-    frames.push({ ms, lamps: await layers(frame) });
+  const first = shot('single-light-dark');
+  const colors = {working:'rgb(0, 200, 255)',completed:'rgb(53, 199, 111)',waiting:'rgb(245, 197, 66)',permission:'rgb(239, 68, 68)',failed:'rgb(239, 68, 68)',off:'rgb(69, 75, 78)'};
+  const firstLayers = await layers(first);
+  assert.equal(firstLayers.length, 8);
+  for (const [status,color] of Object.entries(colors)) {
+    const lights = firstLayers.filter(e => e.path.includes('ct-session-'+status));
+    assert.ok(lights.length > 0 && lights.every(e => e.background===color && e.opacity===1), status+' steady color');
   }
-  const active = (frame, state, color) => frame.lamps.filter(e => e.path.includes('ct-session-'+state) && e.path.includes('ct-lamp-'+color));
-  for (const [state, color, peak, end] of [['working', 'green', 500, 1000], ['waiting', 'yellow', 750, 1500], ['permission', 'red', 750, 1500], ['failed', 'red', 325, 650]]) {
-    const zero = active(frames[0], state, color), bright = active(frames.find(f => f.ms === peak), state, color), dark = active(frames.find(f => f.ms === end), state, color);
-    assert.ok(zero.length > 0 && bright.length === zero.length && dark.length === zero.length, state+' rendered lenses');
-    assert.ok(zero.every(e => e.opacity < .05) && dark.every(e => e.opacity < .05) && bright.every(e => e.opacity > .95), state+' exact bright/dark rhythm');
-  }
-  assert.ok(frames.every(f => f.lamps.every(e => e.opacity === 0 || e.opacity === 1)), 'reference flash has distinct on/off states; smooth breathe is a different effect');
-  assert.ok(frames.every(f => active(f, 'working', 'green').every(e => e.background === 'rgb(0, 200, 255)')), 'working lens is cyan even with reduced motion');
-  assert.ok(frames.every(f => active(f, 'completed', 'green').every(e => e.background === 'rgb(53, 199, 111)')), 'done lens remains green');
-  assert.ok(frames.every(f => active(f, 'completed', 'green').length === 1 && active(f, 'completed', 'green').every(e => e.opacity === 1)), 'done stays green');
-  assert.ok(frames.every(f => f.lamps.filter(e => e.path.includes('ct-session-off')).every(e => e.opacity === 0)), 'read/idle stays off');
-  await writeFile(resolve(out, 'frames.json'), JSON.stringify(frames, null, 2));
-  passed.push('native distinct flash and sampled Working cyan 1s / Attention and Permission 1.5s / Blocked .65s bright-dark cycles; Done steady and Off dark');
-  ctl('appearance light'); ctl('motion-at 750'); shot('traffic-light');
-  ctl('reduce-motion on'); ctl('motion-at 0'); const reduced = shot('traffic-reduced-motion');
-  ctl('motion-at 1400'); const reducedLater = shot('traffic-reduced-motion-later');
-  assert.deepEqual(await layers(reduced), await layers(reducedLater), 'reduced motion keeps lamps stationary');
-  passed.push('reduced motion keeps native lamps static');
+  await pause(1100);
+  const later = shot('single-light-later');
+  assert.deepEqual(await layers(later), firstLayers, 'unchanged snapshot stays steady without re-render');
+  snapshot.rows.push({...base,id:'late-working',title:'新增运行状态 · 常亮',running:true});
+  await render(); shot('single-light-updated');
+  assert.equal(tree('.ct-session-working').length,3);
+  passed.push('native single 8x8 lights render all six colors/states steadily; a real snapshot change adds one working light');
+  ctl('appearance light'); shot('single-light-light');
+  ctl('reduce-motion on'); shot('single-light-reduced-motion');
   ctl('appearance dark'); ctl('resize 390 420'); shot('traffic-narrow');
   assert.ok(tree('[data-role="codex-tern.sessions.item"]').every(n => n.rect[3] <= 34), 'narrow row heights');
   const pins = tree('[data-role="codex-tern.sessions.pin"]'), closes = tree('[data-role="codex-tern.sessions.archive"]');

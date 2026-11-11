@@ -6,7 +6,8 @@ import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import assert from 'node:assert/strict';
 import { prepareTernQaConfig } from './qa-tern-config.mjs';
-const root = resolve(import.meta.dirname, '..'), out = resolve(root, '.prototype/progress-visibility', `native-${process.pid}`);
+const root = resolve(import.meta.dirname, '..'), out = process.env.QA_PROGRESS_OUT
+  ? resolve(process.env.QA_PROGRESS_OUT) : resolve(root, '.prototype/progress-visibility', `native-${process.pid}`);
 const config = resolve(out, 'config'), control = resolve(out, 'control.sock');
 await prepareTernQaConfig(config); await mkdir(resolve(out, 'codex/thread-writer-locks'), { recursive: true });
 const env = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}`, TERN_CONFIG_DIR: config,
@@ -45,12 +46,16 @@ async function generation() {
   for (const line of (await readFile(env.TERN_TSP_RECORD, 'utf8')).trim().split('\n')) { try { visit(JSON.parse(line)); } catch {} }
   return value;
 }
-function visibleProgress(final) {
-  for (const token of ['QA_PROGRESS_1','QA_PUBLIC_SUMMARY','QA_PROGRESS_2', ...(final ? ['QA_PLAN','QA_FINAL'] : [])]) {
+function visibleProgress(final, expanded = false) {
+  const progress = ['QA_PROGRESS_1','QA_PUBLIC_SUMMARY','QA_PROGRESS_2','QA_PLAN'];
+  if (final && !expanded) {
+    for (const token of progress) assert.ok(!text().includes(token), token+' folded after completion');
+  }
+  for (const token of final && !expanded ? ['QA_FINAL'] : ['QA_PROGRESS_1','QA_PUBLIC_SUMMARY','QA_PROGRESS_2', ...(final ? ['QA_PLAN','QA_FINAL'] : [])]) {
     const matches = md().filter(n => n.text?.includes(token)); assert.equal(matches.length, 1, token+' renders exactly once');
     const [x,y,w,h] = matches[0].rect;
     assert.ok(w > 0 && h > 0 && y >= 0 && y+h <= 900 && x >= 0, token+' actually in viewport');
-    assert.ok(!tree('.ct-activity .sf-md').some(n=>n.text?.includes(token)), token+' outside tool fold');
+    if (!expanded) assert.ok(!tree('.ct-activity .sf-md').some(n=>n.text?.includes(token)), token+' outside tool fold');
   }
   assert.ok(!text().includes('QA_HIDDEN_REASONING'), 'raw reasoning content is never rendered');
 }
@@ -97,14 +102,22 @@ try {
   await writeFile(env.QA_PROGRESS_RELEASE_FILE, 'finish');
   await wait(() => text().includes('QA_FINAL') && tree('[data-role="omp.composer.stop"]').length === 0, 'terminal fixture');
   visibleProgress(true); assert.equal(tree('[data-role="ct.activity.details"]').length,0,'default tool groups collapsed');
-  assert.equal(tree('.ct-activity-toggle').length,2,'tools split at progress boundaries');
+  assert.equal(tree('.ct-activity-toggle').length,1,'completed progress and tools share one fold');
+  const quiet = tree('.ct-activity-toggle-quiet')[0];
+  assert.ok(quiet && quiet.rect[2] < 240, 'completed toggle hugs its short duration label');
+  assert.equal(tree('.ct-activity-indicator').length,0,'completed toggle has no leading status icon');
+  assert.equal(tree('[data-role="ct.activity.meta"]').length,0,'completed toggle omits tool and error counters');
   const order = md().filter(n => /QA_PROGRESS_1|QA_PUBLIC_SUMMARY|QA_PROGRESS_2|QA_PLAN|QA_FINAL/.test(n.text??'')).map(n=>n.text);
-  assert.deepEqual(order.map(t=>t.match(/QA_PROGRESS_1|QA_PUBLIC_SUMMARY|QA_PROGRESS_2|QA_PLAN|QA_FINAL/)[0]), ['QA_PROGRESS_1','QA_PUBLIC_SUMMARY','QA_PROGRESS_2','QA_PLAN','QA_FINAL']);
+  assert.deepEqual(order.map(t=>t.match(/QA_PROGRESS_1|QA_PUBLIC_SUMMARY|QA_PROGRESS_2|QA_PLAN|QA_FINAL/)[0]), ['QA_FINAL']);
   await evidence('finished-collapsed');
-  passed.push('terminal default folds hide tools only; progress/summary/plan/final remain ordered and unique');
-  for (const i of [0,1]) {
+  ctl('appearance dark'); await pause(150); visibleProgress(true); await evidence('finished-collapsed-dark');
+  ctl('appearance light'); await pause(150);
+  passed.push('completion folds progress, summaries, plans and tools; final reply remains visible');
+  for (const i of [0]) {
     clickToggle(i); await wait(()=>tree('[data-role="ct.activity.details"]').length===1, 'expanded tool group');
-    visibleProgress(true);
+    visibleProgress(true, true);
+    const order = md().filter(n => /QA_PROGRESS_1|QA_PUBLIC_SUMMARY|QA_PROGRESS_2|QA_PLAN|QA_FINAL/.test(n.text??'')).map(n=>n.text.match(/QA_PROGRESS_1|QA_PUBLIC_SUMMARY|QA_PROGRESS_2|QA_PLAN|QA_FINAL/)[0]);
+    assert.deepEqual(order, ['QA_PROGRESS_1','QA_PUBLIC_SUMMARY','QA_PROGRESS_2','QA_PLAN','QA_FINAL']);
     const commandToggles = () => tree('.ct-command-toggle');
     assert.ok(commandToggles().length > 0,'completed commands have independent toggles');
     assert.equal(tree('[data-role="ct.command.details"]').length,0,'opening activity does not mount command output');
@@ -124,7 +137,7 @@ try {
     visibleProgress(true, true); await evidence('nested-commands-reloaded-'+i);
     clickToggle(i); await wait(()=>tree('[data-role="ct.activity.details"]').length===0, 'collapsed tool group'); visibleProgress(true);
   }
-  passed.push('expanding and collapsing each real native tool group cannot hide progress');
+  passed.push('expanding restores all public progress once in order; collapsing keeps only final visible');
   passed.push('completed commands stay independently folded on activity opening, reopening and native reload; selected output opens on demand');
   const ended = await generation(); ctl('key Control+Shift+r');
   await wait(async () => (await generation()) > ended,'terminal reload'); visibleProgress(true);
@@ -133,7 +146,7 @@ try {
   const requests = (await readFile(env.QA_RPC_LOG,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
   assert.equal(requests.filter(r=>r.method==='turn/start').length,1,'reload does not resend fixture');
   await writeFile(resolve(out,'reload-evidence.json'),JSON.stringify({initialGeneration:before,finalGeneration:await generation(),manifest,turnStartCount:1},null,2));
-  passed.push('actual native Ctrl+Shift+R reload path preserves streaming and terminal progress without resending; API version protection unchanged');
+  passed.push('actual native Ctrl+Shift+R preserves live progress and completed fold without resending');
 } catch (error) {
   limitations.push(error.message); try { await evidence('failed'); } catch {} throw error;
 } finally {

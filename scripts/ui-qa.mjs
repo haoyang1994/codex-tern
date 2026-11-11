@@ -197,7 +197,7 @@ try {
   ctl('shot continuing-after-answer');
   await send('QA_FINISH_CONTINUING');
   await waitFor(() => tree('[data-role="omp.composer.stop"]').length === 0, 'continued turn finishes');
-  assert.ok(tree('[data-role="ct.activity.state"]').every(n => n.text === 'Worked'));
+  assert.ok(tree('[data-role="ct.activity.state"]').every(n => /^(Took |View activity$)/.test(n.text)));
   assert.equal(tree('[data-role="omp.working"] .sf-spinner').length, 0);
   assert.equal(tree('.ct-activity-preview').length, 0);
   pass('delivered answers and steering keep the working row visible until turn completion');

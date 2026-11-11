@@ -266,6 +266,11 @@ createInterface({ input: process.stdin }).on('line', async line => {
             threadId: current.id, turnId: turn.id, itemId: 'string-approval', command: 'echo QA_STRING_ID', cwd: process.cwd(),
           } });
         }
+      } else if (text.startsWith('QA_CONTEXT_')) {
+        const used = text.includes('COMPACT') ? 24000 : 48200;
+        const usage = { totalTokens: used, inputTokens: used - 200, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 200, reasoningOutputTokens: 100 };
+        event('thread/tokenUsage/updated', { tokenUsage: { last: usage, total: { ...usage, totalTokens: 900000 }, modelContextWindow: 200000 } });
+        finish('QA_CONTEXT_FINAL: Native usage fixture.');
       } else if (text.includes('QA_COMMENTARY_FIXTURE')) {
         const commentary = '收到，普通对话和任务完成通知两条链路都需要查。服务虽然显示在线，但你已经确认收不到消息，所以不能据此说功能可用。我会逐项核对完成事件、发送队列和微信接口回执，查清漏在哪里。';
         const command = n => add({ id: `commentary-command-${n}`, type: 'commandExecution', command: `echo QA_COMMENTARY_COMMAND_${n}`, cwd: process.cwd(), status: 'completed', exitCode: 0, aggregatedOutput: `QA_COMMENTARY_OUTPUT_${n}` });

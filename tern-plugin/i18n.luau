@@ -1,5 +1,8 @@
 -- Generated from src/i18n.ts by bun run build.
 local strings = {
+  ["Context"] = "上下文",
+  ["used"] = "已用",
+  ["Latest native context estimate, not cumulative task usage."] = "原生上报的最近上下文用量，不是任务累计消耗。",
   ["This request needs the original client. Weixin cannot process secret input, authentication, incomplete calls or expired requests."] = "此请求需要回到原会话处理。微信不能处理秘密输入、登录验证、信息不完整或已过期的调用。",
   ["Weixin relay claim is uncertain. Check the original session; commands will not be replayed."] = "微信指令的领取回执不确定，请核对原会话；不会自动重投。",
   ["Weixin relay is unavailable. Native sessions remain usable."] = "微信会话桥接暂不可用，原生会话仍可正常使用。",
@@ -152,6 +155,8 @@ local strings = {
   ["Needs input"] = "需要输入",
   ["Activity"] = "执行过程",
   ["Worked"] = "已执行",
+  ["Took"] = "用时",
+  ["View activity"] = "查看过程",
   ["Stopped"] = "已停止",
   ["Failed"] = "失败",
   ["Working"] = "正在处理",

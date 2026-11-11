@@ -4,10 +4,18 @@ Notable changes, newest first. This log starts with the update below.
 
 ## 2026-11-11
 
+### Added
+
+- Session rows use a single status light. Working rows share a host clock, so later-started sessions flash in phase; waiting, permission, completion and failure stay steady.
+- Composer footer shows native context usage, capacity and percentage, with exact counts on hover and unknown values left blank until reported. Compatible UI reloads retain per-session estimates.
+
 ### Changed
 
 - Opening a completed task's activity keeps individual commands folded. Open a command separately to inspect its output; reopening the activity starts with those commands folded again.
 - Running command and tool groups use a small text label and trailing chevron without a full-width background. Counts remain available on hover, errors keep a warning icon, and details open on demand without an automatic live preview.
+- Completed activity uses a small duration label and trailing chevron, with tool counts and error details available on hover instead of in a full-width bar.
+- Completed tasks fold their progress replies, public summaries, plans and tools together, leaving the final reply expanded. Live progress stays visible, and the folded history can be reopened.
+- Remove the standalone terminal-result label and redundant completion banner/toast for the currently visible conversation. Background reminders and read-aware sidebar lights remain available.
 
 ## 2026-11-10
 

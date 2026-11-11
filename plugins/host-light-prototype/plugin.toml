@@ -1,0 +1,14 @@
+schema = 1
+id = "host-light-prototype"
+name = "后台单灯原型"
+version = "0.1.0"
+description = "合成状态的独立 host block；500ms 后台节拍，不接入侧栏。"
+icon = "circle"
+host = "host.luau"
+window = "window.luau"
+styles = ["light.css"]
+
+[[blocks]]
+id = "light"
+title = "后台单灯原型"
+icon = "circle"

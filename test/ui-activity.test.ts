@@ -57,7 +57,7 @@ test('a delivered answer and later steering keep activity live until the turn co
   assert.deepEqual(render(), { states: ['Activity'], spinners: 1, stop: true, previews: 0 });
 
   emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } });
-  assert.deepEqual(render(), { states: ['Worked'], spinners: 0, stop: false, previews: 0 });
+  assert.deepEqual(render(), { states: ['View activity', 'View activity'], spinners: 0, stop: false, previews: 0 });
 });
 
 test('input requested after an answer stays visible and returns to Working when resolved', t => {
@@ -99,7 +99,7 @@ test('the dock shows work before any activity arrives and while an answer stream
   assert.equal(working(), undefined);
 });
 
-test('interleaved commentary stays outside collapsed tool blocks and streams once in chronological order', t => {
+test('interleaved commentary streams in order, then collapses with work when the turn completes', t => {
   const { ui, c, emit, item, render, main } = setup(); t.after(() => ui.close());
   c.items = [];
   item('before', 'agentMessage', { phase: 'commentary', text: 'I will inspect the release request.' });
@@ -109,18 +109,21 @@ test('interleaved commentary stays outside collapsed tool blocks and streams onc
   item('progress', 'agentMessage', { phase: 'commentary', text: 'I found the release.' });
   item('tool-b', 'commandExecution', { command: 'echo second', status: 'completed', exitCode: 0 });
   item('final', 'agentMessage', { phase: 'final_answer', text: 'Release checks are complete.' });
+  render();
+  assert.deepEqual(nodes(main()).filter(n => n.kind === 'md').map(n => n.props.text),
+    ['I will inspect the release request.', 'I found the release.', 'Release checks are complete.']);
   emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();
   const blocks = main().children.map(wrapper => wrapper.children[0]!);
   assert.deepEqual(blocks.map(n => n.props.role === 'omp.assistant' ? 'assistant' : n.props.class === 'ct-activity' ? 'tools' : 'result'),
-    ['assistant', 'tools', 'assistant', 'tools', 'assistant', 'result']);
+    ['tools', 'assistant', 'result']);
   assert.equal(nodes(main()).filter(n => n.props.role === 'ct.activity.details').length, 0, 'tools are collapsed');
   assert.deepEqual(nodes(main()).filter(n => n.kind === 'md').map(n => n.props.text),
-    ['I will inspect the release request.', 'I found the release.', 'Release checks are complete.']);
+    ['Release checks are complete.']);
   assert.equal(c.items.filter(i => i.item.id === 'progress').length, 1);
 });
 
 
-test('public streamed summary and plan remain visible outside tool folds without hidden reasoning', t => {
+test('public streamed summary and plan collapse on completion without exposing hidden reasoning', t => {
   const { ui, c, emit, item, render, main } = setup(); t.after(() => ui.close()); c.items = [];
   item('command-a', 'commandExecution', { command: 'echo first', status: 'completed' });
   item('summary', 'reasoning', { summary: [], content: ['HIDDEN_REASONING'] }, false);
@@ -133,9 +136,48 @@ test('public streamed summary and plan remain visible outside tool folds without
   emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();
   const visible = nodes(main());
   assert.equal(visible.filter(n => n.props.role === 'ct.activity.details').length, 0);
-  assert.deepEqual(visible.filter(n => n.kind === 'md').map(n => n.props.text), ['Public progress', 'Public plan progress']);
-  assert.ok(visible.filter(n => ['omp.thinking', 'omp.progress.plan'].includes(String(n.props.role))).every(n => !n.props.collapsible && !n.props.collapsed));
+  assert.deepEqual(visible.filter(n => n.kind === 'md').map(n => n.props.text), []);
   assert.equal(JSON.stringify(main()).includes('HIDDEN_REASONING'), false);
+});
+
+test('completion resets previously expanded work and preserves expandable progress across restored turns', async t => {
+  const { ui, c, emit, item, render, main } = setup(); t.after(() => ui.close());
+  const click = async () => {
+    const toggle = nodes(main()).find(n => String(n.props.class).split(' ').includes('ct-activity-toggle'))!;
+    await toggle.handlers!.onClick!({ ev: 'action', sf: 'test', id: 'toggle', act: 'click', raw: {} });
+  };
+  render(); await click();
+  assert.equal(nodes(main()).filter(n => n.props.role === 'ct.activity.details').length, 1);
+  // The earlier work is no longer the latest activity, but its expanded state
+  // must still reset when the entire turn finishes.
+  item('summary', 'reasoning', { summary: [] }, false); render(); await click();
+  item('summary', 'reasoning', { summary: ['Public summary'] });
+  item('progress', 'agentMessage', { phase: 'commentary', text: 'Saved progress' });
+  item('final', 'agentMessage', { phase: 'final_answer', text: 'Final reply' });
+  emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();
+  assert.equal(nodes(main()).filter(n => n.props.role === 'ct.activity.details').length, 0);
+  assert.deepEqual(nodes(main()).filter(n => n.kind === 'md').map(n => n.props.text), ['Final reply']);
+  await click();
+  assert.deepEqual(nodes(main()).filter(n => n.kind === 'md').map(n => n.props.text),
+    ['Should I change the core rules too?', 'Public summary', 'Saved progress', 'Final reply']);
+  await click();
+  // Model a restored history page followed by a different live turn.
+  c.items = c.items.map(entry => ({ ...entry, done: true }));
+  emit('turn/started', { turn: { id: 'next', status: 'inProgress', items: [] } });
+  emit('item/completed', { turnId: 'next', item: { id: 'next-progress', type: 'agentMessage', phase: 'commentary', text: 'Next live progress' } });
+  render();
+  assert.deepEqual(nodes(main()).filter(n => n.kind === 'md').map(n => n.props.text), ['Final reply', 'Next live progress']);
+});
+
+test('completed work uses a short localized duration and a trailing chevron', t => {
+  const { ui, c, emit, render, main } = setup(); t.after(() => ui.close());
+  c.preferences.language = 'zh-CN';
+  emit('turn/completed', { turn: { id: 'turn', status: 'completed', durationMs: 194000, items: [] } }); render();
+  const toggle = nodes(main()).find(n => String(n.props.class).includes('ct-activity-toggle-quiet'))!;
+  assert.deepEqual(toggle.children.map(n => n.props.text ?? n.props.role), ['用时 3m 14s', 'ct.activity.chevron']);
+  assert.equal(nodes(toggle).some(n => n.props.class === 'ct-activity-indicator' || n.props.role === 'ct.activity.meta'), false);
+  emit('turn/completed', { turn: { id: 'turn', status: 'completed', durationMs: 768000, items: [] } }); render();
+  assert.ok(nodes(main()).some(n => n.props.text === '用时 12m 48s'));
 });
 
 test('live tool output stays folded across updates while counts, errors and manual disclosure remain usable', async t => {

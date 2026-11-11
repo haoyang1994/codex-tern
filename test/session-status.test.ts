@@ -127,3 +127,46 @@ test('UI reload retains unread results but discards prior interaction and viewpo
   (host.current as any).inspectResult = async () => ({ fullyVisible: ['main.result:a'] });
   await (host.current as any).readVisibleResult(); assert.equal(c.unreadResult('one'), before);
 });
+
+
+test('terminal read anchor adds no visible completion text and leaves real errors visible', async t => {
+  const { ui, c, finish, frame } = setup(); t.after(() => ui.close());
+  c.notices.push({ id: 1, error: true, text: 'Actual execution error' });
+  finish('a', 'failed'); ui.render();
+  const nodes = (n: Node): Node[] => [n, ...n.children.flatMap(nodes)];
+  const marker = nodes(frame().main).find(n => n.props.role === 'ct.turn.result')!;
+  assert.ok(marker); assert.deepEqual(marker.props.attrs, { 'aria-hidden': true });
+  assert.equal(nodes(marker).some(n => n.props.text), false);
+  assert.equal(nodes(frame().main).some(n => n.props.text === 'Task complete' || n.props.text === 'Task failed'), false);
+  assert.ok(nodes(frame().main).some(n => n.props.text === 'Actual execution error'));
+});
+
+test('footer shows live context usage and keeps its estimate after compatible UI replacement', async t => {
+  const { ui, c, emit, frame, transport } = setup(); t.after(() => ui.close());
+  await c.preferences.setLanguage('zh-CN');
+  emit('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 48200 }, total: { totalTokens: 900000 }, modelContextWindow: 200000 } });
+  ui.render();
+  const nodes = (n: Node): Node[] => [n, ...n.children.flatMap(nodes)];
+  let footer = nodes(frame().dock).find(n => n.props.role === 'ct.context.usage')!;
+  assert.ok(JSON.stringify(footer).includes('上下文 48.2k / 200k · 24.1%'));
+  const listeners = transport.listenerCount('notification');
+  const host = new NativeHost(c, ui.session, ui.surface, { NativeUI, UI_API_VERSION }); t.after(() => host.close());
+  await host.reload(); host.current.render();
+  footer = nodes(frame().dock).find(n => n.props.role === 'ct.context.usage')!;
+  assert.ok(JSON.stringify(footer).includes('上下文 48.2k / 200k · 24.1%'));
+  assert.equal(transport.listenerCount('notification'), listeners);
+});
+
+
+test('selected visible completion is quiet while another session still gets its notification', async t => {
+  const { ui, c, finish, frame } = setup(); t.after(() => ui.close());
+  c.notifications = true;
+  const notices: string[] = []; ui.notify = e => notices.push(e.threadId);
+  finish(); ui.render();
+  assert.deepEqual(notices, []);
+  const nodes = (n: Node): Node[] => [n, ...n.children.flatMap(nodes)];
+  assert.equal(nodes(frame().dock).some(n => n.props.role === 'ct.completion'), false);
+  finish('b', 'completed', 'two'); ui.render();
+  assert.deepEqual(notices, ['two']);
+  assert.equal(nodes(frame().dock).some(n => n.props.role === 'ct.completion'), true);
+});

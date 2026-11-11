@@ -27,3 +27,24 @@ test('empty finished reasoning disappears and command previews stay bounded', ()
   assert.ok(preview.output.endsWith('last\nline'));
   assert.equal(activitySummary([command, item('s2', 'commandExecution'), item('f', 'fileChange')]), '2 commands · 1 file change');
 });
+
+test('completed turns fold all progress in order and keep only their last answer', () => {
+  const entries = [item('u', 'userMessage'), item('c', 'agentMessage', { phase: 'commentary' }),
+    item('s', 'commandExecution'), item('r', 'reasoning', { summary: ['Public summary'] }),
+    item('p', 'plan'), item('early', 'agentMessage', { phase: 'final_answer' }),
+    item('steer', 'userMessage'), item('c2', 'agentMessage', { phase: 'commentary' }),
+    item('f', 'agentMessage', { phase: 'final_answer' }),
+    item('live', 'agentMessage', { phase: 'commentary' }, 'next')];
+  const parts = transcriptParts(entries, new Set(['turn']));
+  assert.deepEqual(parts.map(p => p.kind === 'message' ? p.entry.id : p.entries.map(e => e.id)),
+    ['u', ['c', 's', 'r', 'p', 'early'], 'steer', ['c2'], 'f', 'live']);
+  assert.deepEqual(parts.flatMap(p => p.kind === 'message' ? [p.entry] : p.entries), entries);
+});
+
+test('restored legacy replies use the last unphased message, and commentary-only turns keep all content', () => {
+  const parts = transcriptParts([item('old', 'agentMessage', { phase: null }),
+    item('last', 'agentMessage'), item('tail', 'agentMessage', { phase: 'commentary' }),
+    item('only', 'agentMessage', { phase: 'commentary' }, 'other')], new Set(['turn', 'other']));
+  assert.deepEqual(parts.map(p => p.kind === 'message' ? p.entry.id : p.entries.map(e => e.id)),
+    [['old'], 'last', ['tail'], ['only']]);
+});

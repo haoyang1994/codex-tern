@@ -35,38 +35,18 @@
 [data-role="codex-tern.sessions.item"][data-mark="locked"] { color: var(--t3); cursor: default; }
 [data-role="codex-tern.sessions.item"][data-mark="locked"]:hover { background: transparent; }
 [data-role="codex-tern.sessions.lock"] { width: 13px; height: 13px; flex-shrink: 0; color: var(--t3); }
-/* One non-interactive traffic light per row. All inactive lamps stay dark gray;
-   Flash is a discrete on/off change (reference distinguishes flash from breathe).
-   Opacity changes only the small colored lens, never the row background. */
+/* One non-interactive status light per row. Host block frames drive the
+   running phase; there is no window timer or CSS animation for the lamp. */
 .ct-session-traffic {
-  display: inline-flex; align-items: center; justify-content: center;
-  flex: 0 0 36px; width: 36px; height: 14px; min-width: 36px;
-  box-sizing: border-box; padding: 3px; gap: 3px; border-radius: 7px;
-  background: #111517; pointer-events: none;
+  display: block; flex: 0 0 8px; width: 8px; height: 8px; min-width: 8px;
+  border-radius: 50%; background: #454b4e; pointer-events: none;
+  animation: none; transition: none;
 }
-.ct-lamp {
-  display: block; position: relative; flex: 0 0 8px; width: 8px; height: 8px;
-  border-radius: 50%; background: #454b4e;
-}
-.ct-lamp-lit { position: absolute; inset: 0; border-radius: 50%; opacity: 0; }
-.ct-lamp-red > .ct-lamp-lit { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
-.ct-lamp-yellow > .ct-lamp-lit { background: #f5c542; box-shadow: 0 0 4px #f5c542; }
-.ct-lamp-green > .ct-lamp-lit { background: #35c76f; box-shadow: 0 0 4px #35c76f; }
-.ct-session-working .ct-lamp-green > .ct-lamp-lit { background: #00c8ff; box-shadow: 0 0 4px #00c8ff; animation: ct-traffic-flash 1s steps(1, end) infinite; }
-.ct-session-waiting .ct-lamp-yellow > .ct-lamp-lit,
-.ct-session-permission .ct-lamp-red > .ct-lamp-lit { animation: ct-traffic-flash 1.5s steps(1, end) infinite; }
-.ct-session-failed .ct-lamp-red > .ct-lamp-lit { animation: ct-traffic-flash .65s steps(1, end) infinite; }
-.ct-session-completed .ct-lamp-green > .ct-lamp-lit { opacity: 1; }
-@keyframes ct-traffic-flash {
-  0%, 100% { opacity: 0; }
-  50% { opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .ct-session-working .ct-lamp-green > .ct-lamp-lit,
-  .ct-session-waiting .ct-lamp-yellow > .ct-lamp-lit,
-  .ct-session-permission .ct-lamp-red > .ct-lamp-lit,
-  .ct-session-failed .ct-lamp-red > .ct-lamp-lit { animation: none; opacity: 1; }
-}
+.ct-session-working { background: #00c8ff; }
+.ct-session-dim { opacity: 0.2; }
+.ct-session-completed { background: #35c76f; }
+.ct-session-waiting { background: #f5c542; }
+.ct-session-permission, .ct-session-failed { background: #ef4444; }
 .sf.sf-el[data-role="codex-tern.sessions.archive"] {
   display: inline-flex;
   align-items: center;

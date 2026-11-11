@@ -469,6 +469,25 @@ export const appearanceStyles = css`
   }
   .sf.sf-el.ct-activity [data-role="ct.activity.state"] { color: var(--t2); font-weight: 400; flex-shrink: 0; }
   .sf.sf-el.ct-activity [data-role="ct.activity.meta"] { color: var(--t3); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .sf.sf-el.ct-activity .ct-activity-toggle-quiet {
+    display: inline-flex;
+    align-self: flex-start;
+    align-items: center;
+    justify-content: flex-start;
+    width: auto;
+    min-height: 24px;
+    gap: 6px;
+    padding: 2px 0;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    box-shadow: none;
+    font-family: var(--ct-prose);
+    cursor: pointer;
+  }
+  .sf.sf-el.ct-activity .ct-activity-toggle-quiet [data-role="ct.activity.state"] { font-weight: 400; }
+  .sf.sf-el.ct-activity .ct-activity-toggle-quiet:hover,
+  .sf.sf-el.ct-activity .ct-activity-toggle-quiet:active { background: transparent; color: var(--t1); }
   .sf.sf-el.ct-activity .ct-activity-preview {
     margin: 0 0 4px 27px;
     padding: 2px 0 2px 14px;

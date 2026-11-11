@@ -333,9 +333,10 @@ test('completion is delivered once after the final queued turn; stopped turns an
   c.activeTurn = 'failed'; finish(rpc, 'new', 'failed', 'failed'); assert.equal(events[1].status, 'failed');
 });
 
-test('fast completion before acknowledgement still notifies once and reminders can be disabled', async t => {
+test('background fast completion before acknowledgement notifies once and reminders can be disabled', async t => {
   const { c, rpc } = controller(); await c.connect();
   const ui = uiFor(c); t.after(() => ui.close()); const notifications: Completion[] = []; ui.notify = e => notifications.push(e);
+  ui.setVisible(false);
   let seq = 0;
   rpc.handler = async () => {
     const id = `fast-${++seq}`; finish(rpc, 'new', id); return { turn: { id, status: 'completed', items: [] } };

@@ -43,89 +43,6 @@ local function send(cx, target, act, value)
   return true
 end
 
-local function view(snapshot, selection, reveals)
-  local function t(value) return translate(snapshot.language, value) end
-  local rows = {}
-  local current = snapshot.current
-  local folder = string.match(snapshot.cwd or "", "([^/]+)/*$") or snapshot.cwd or t("Sessions")
-  table.insert(rows, {k = "text", p = {key = "folder", role = "codex-tern.sessions.folder", text = folder, title = snapshot.cwd}})
-  table.insert(rows, {k = "row", p = {key = "new", role = "codex-tern.sessions.new", align = "center", gap = "sm",
-    title = t("New session · Ctrl+Shift+N"), mark = if snapshot.canSwitch then nil else "disabled",
-    actions = if snapshot.canSwitch then {click = "new"} else nil}, c = {
-      {k = "icon", p = {key = "icon", name = "plus"}},
-      {k = "text", p = {key = "label", text = t("New session")}},
-    }})
-  for _, item in snapshot.rows do
-    local locked = item.locked and item.id ~= snapshot.current
-    local status = if locked then nil elseif item.waiting then (if item.permission then "permission" else "waiting") elseif item.running then "working"
-      elseif item.failed then "failed" elseif item.completed then "completed" else "off"
-    local status_text = if status == "working" then t("Working") elseif status == "waiting" then t("Needs your input")
-      elseif status == "permission" then t("Waiting for permission")
-      elseif status == "failed" then t("Task failed · Open to review") elseif status == "completed" then t("Task complete · Unread") else t("Lights off")
-    local reveal = reveals and item.titleRevision and reveals[item.id] == item.titleRevision
-    local title = {k = "row", p = {key = "heading", align = "center", gap = "sm"}, c = {
-      {k = "col", p = {key = "title", role = "codex-tern.sessions.title",
-        title = item.title .. "\n" .. item.time, grow = 1}, c = {
-        {k = "col", p = {key = if reveal then "reveal:" .. item.titleRevision else "label",
-          role = "codex-tern.sessions.reveal", mark = if reveal then "reveal" else nil}, c = {
-          {k = "text", p = {key = "text", role = "codex-tern.sessions.label", text = item.title, lines = 1}},
-        }},
-      }},
-    }}
-    if locked then
-      table.insert(title.c, {k = "icon", p = {key = "status", name = "lock", role = "codex-tern.sessions.lock", title = t("Open in another client")}})
-    end
-    local lamps = {}
-    for _, color in {"red", "yellow", "green"} do
-      table.insert(lamps, {k = "el", p = {key = color, tag = "span", class = "ct-lamp ct-lamp-" .. color,
-        attrs = {["aria-hidden"] = "true"}}, c = {
-          {k = "el", p = {key = "lit", tag = "span", class = "ct-lamp-lit"}},
-        }})
-    end
-    table.insert(title.c, 1, {k = "el", p = {key = "traffic", tag = "span", role = "codex-tern.sessions.traffic",
-      class = "ct-session-traffic ct-session-" .. (status or "off"), title = status_text, aria = status_text,
-      attrs = {["role"] = "img"}}, c = lamps})
-    local can_archive = snapshot.archiveProtocol == 1 and item.canArchive and not locked
-    if snapshot.pinProtocol == 1 then
-      table.insert(title.c, {k = "el", p = {key = "pin", tag = "button", role = "codex-tern.sessions.pin",
-        aria = if item.pinned then t("Unpin session") else t("Pin session"),
-        title = if item.pinned then t("Unpin session") else t("Pin session"),
-        mark = if item.pinned then "pinned" else nil, attrs = {["aria-pressed"] = if item.pinned then "true" else "false"},
-        actions = {click = "pin=" .. item.id}}, c = {
-          {k = "text", p = {key = "icon", text = if item.pinned then "★" else "☆"}},
-        }})
-    end
-    table.insert(title.c, {k = "el", p = {key = "archive", tag = "button", role = "codex-tern.sessions.archive",
-      aria = t("Archive session"), title = if can_archive then t("Archive session") else t("Session cannot be archived yet"),
-      mark = if can_archive then nil else "disabled", attrs = {["aria-disabled"] = if can_archive then "false" else "true"},
-      actions = {click = "archive=" .. item.id}}, c = {
-        {k = "icon", p = {key = "icon", name = "x"}},
-      }})
-    local body = {title}
-    table.insert(rows, {k = "col", p = {key = item.id, role = "codex-tern.sessions.item",
-      aria = item.title .. (if status_text then " · " .. status_text else ""),
-      mark = if item.id == current then "pick" elseif locked then "locked"
-        elseif selection and item.id == selection.id then "pending" else nil,
-      title = item.title, actions = {click = if locked then nil else "resume=" .. item.id,
-        menu = {t("Rename session"), t("Delete session")}}}, c = body})
-  end
-  local note = snapshot.error
-  if note == nil or note == "" then
-    if snapshot.connecting then note = t("Connecting…")
-    elseif not snapshot.connected then note = t("Codex disconnected.")
-    elseif selection and selection.id ~= current then note = t("Opening session…")
-    elseif snapshot.loading and #snapshot.rows == 0 then note = t("Loading…")
-    elseif #snapshot.rows == 0 then note = t("No sessions in this folder.")
-    elseif not snapshot.canSwitch then note = snapshot.blockedReason end
-  end
-  -- Keep the keyed structure stable while a switch is in flight.
-  table.insert(rows, {k = "text", p = {key = "note", role = "codex-tern.sessions.note",
-    hidden = not note or note == "", tone = "muted", text = note or ""}})
-  if snapshot.more then
-    table.insert(rows, {k = "text", p = {key = "more", role = "codex-tern.sessions.note", text = t("Load more"), actions = {click = "more"}}})
-  end
-  return {k = "col", p = {key = "sessions", role = "codex-tern.sessions"}, c = rows}
-end
 
 local function paint(cx, pane, entry, snapshot)
   local versions, reveals = {}, {}
@@ -140,45 +57,48 @@ local function paint(cx, pane, entry, snapshot)
   end
   entry.title_versions = versions
   entry.title_reveals = reveals
-  local next_view = view(snapshot, entry.selection, reveals)
-  local previous = entry.view
-  local same_order = previous ~= nil and #previous.c == #next_view.c
-  if same_order then
-    for i, node in next_view.c do
-      if node.p.key ~= previous.c[i].p.key then same_order = false; break end
-    end
+  local surface = cx.session:surface(pane)
+  if surface and surface.surface then
+    cx.session:event(pane, {sf = surface.surface.id, ev = "action", act = "sync",
+      value = tern.json.encode({snapshot = snapshot, selection = entry.selection, reveals = reveals})})
+    return true
   end
-  if same_order then
-    local patch = {}
-    for i, node in next_view.c do
-      if tern.json.encode(node) ~= tern.json.encode(previous.c[i]) then
-        patch[node.p.key] = node
-      end
-    end
-    if next(patch) then cx.canvas:set(pane, {set = patch}) end
-  else
-    cx.canvas:set(pane, {view = next_view})
-  end
-  entry.view = next_view
+  return false
 end
 
 local function remember(cx)
   outline.remember(cx)
+  for _, pane in cx.session:panes() do
+    local record = tern.kv.get("sessions.block:" .. pane.pane)
+    if record and not record.closed and type(record.target) == "number" and not panels[pane.pane] then
+      panels[pane.pane] = {target = record.target, refreshed = 0}
+    end
+  end
   for _, canvas in cx.canvas:list() do
     if canvas.owner == tern.plugin.id and string.sub(canvas.about or "", 1, #PREFIX) == PREFIX then
       local target = tonumber(string.sub(canvas.about, #PREFIX + 1))
-      if target and not panels[canvas.pane] then panels[canvas.pane] = {target = target, refreshed = 0} end
+      if target then
+        local pane = cx:new_block("codex-tern.sessions", {tostring(target)}, "over", {target = canvas.pane, focus = false})
+        if pane then
+          panels[canvas.pane] = nil
+          panels[pane] = {target = target, refreshed = 0}
+          cx.layout:close(canvas.pane)
+        end
+      end
     end
   end
 end
 
 local function update(cx, pane, entry)
-  if not cx.session:pane(pane) or not cx.canvas:get(pane) then panels[pane] = nil; return end
+  if not cx.session:pane(pane) then panels[pane] = nil; return end
   local state = bridge(cx, entry.target)
   if not state then
     if entry.raw ~= "closed" then
-      cx.canvas:set(pane, {view = {k = "text", p = {role = "codex-tern.sessions.note", text = t("The Codex client is closed.")}}})
+      local surface = cx.session:surface(pane)
+      if surface and surface.surface then cx.session:event(pane, {sf = surface.surface.id,
+        ev = "action", act = "sync", value = tern.json.encode({closed = true, language = language})}) end
       entry.raw = "closed"
+      entry.snapshot = nil
       -- The closed placeholder replaced the list, even if recovery later loads
       -- an identical snapshot. The next live frame must rebuild that list.
       entry.view = nil
@@ -188,6 +108,7 @@ local function update(cx, pane, entry)
     end
     return
   end
+  entry.snapshot = state.snapshot
   local previous_selection = entry.selection
   if entry.selection then
     local selection = entry.selection
@@ -205,8 +126,7 @@ local function update(cx, pane, entry)
     end
   end
   if state.raw ~= entry.raw or previous_selection ~= entry.selection then
-    paint(cx, pane, entry, state.snapshot)
-    entry.raw = state.raw
+    if paint(cx, pane, entry, state.snapshot) then entry.raw = state.raw end
   end
   if tern.now() - entry.refreshed > 15000 then
     send(cx, entry.target, "refresh")
@@ -274,11 +194,12 @@ local function open(cx, automatic_target)
     end
   end
   if not automatic_target then cx.layout:focus(target) end
-  local pane, err = cx.canvas:open({title = t("Sessions"), view = view(state.snapshot),
-    about = PREFIX .. tostring(target), how = "beside", focus = false})
+  local pane = cx:new_block("codex-tern.sessions", {tostring(target)}, "beside", {focus = false})
+  local err = "Host sessions block unavailable; reload the codex-tern plugin."
   if not pane then cx:toast("error", t("Could not open Codex sessions"), err); return end
   cx.layout:move(pane, target, "left", {focus = false})
-  panels[pane] = {target = target, raw = state.raw, view = view(state.snapshot), refreshed = tern.now(), locks_refreshed = tern.now()}
+  panels[pane] = {target = target, snapshot = state.snapshot, refreshed = tern.now(), locks_refreshed = tern.now()}
+  paint(cx, pane, panels[pane], state.snapshot)
   widths.initialize(cx, pane, panels[pane], state.snapshot)
   if automatic_target then outline.open(cx, target, pane, state) end
   watch_widths()
@@ -355,9 +276,8 @@ tern.command({id = "reload", title = "Codex: Reload Window", icon = "app-codex",
   send(cx, target, "reload")
 end})
 
-tern.on("canvas_action", function(ev, cx)
+local function session_action(ev, cx)
   remember(cx)
-  if outline.action(ev, cx, bridge, send) then poll(true); return true end
   local entry = panels[ev.pane]
   if not entry then return true end
   bridge(cx, entry.target)
@@ -448,14 +368,41 @@ tern.on("canvas_action", function(ev, cx)
       then t("Finish this session's task, answers, queue and draft before deleting.")
       else "Exit the Codex client with Ctrl+Q, then run codex-tern again to enable deleting sessions.")
   elseif ev.act == "more" then send(cx, entry.target, "more"); poll(true) end
-  -- Always consume owned clicks, including stale ones. Never fall through to Carly.
+  -- Always consume owned clicks, including stale ones.
   return true
+end
+
+tern.on("canvas_action", function(ev, cx)
+  remember(cx)
+  if outline.action(ev, cx, bridge, send) then poll(true); return true end
+  return session_action(ev, cx)
+end)
+
+-- Host BlockCx:open effects pass through this window route immediately; actions
+-- do not wait for the business polling timer and never fall through to the OS.
+tern.route.link(function(link, cx)
+  local prefix = "codex-tern-internal://sessions/"
+  if string.sub(link.url, 1, #prefix) ~= prefix then return nil end
+  local ok, event = pcall(function()
+    return tern.json.decode(tern.base64.decode(string.sub(link.url, #prefix + 1)))
+  end)
+  if ok and type(event) == "table" and event.pane == link.pane then
+    session_action(event, cx)
+  end
+  return {handled = true}
 end)
 
 tern.on("pane_closed", function(ev, cx)
   outline.closed(ev.pane)
   local entry = panels[ev.pane]
+  local key = "sessions.block:" .. ev.pane
+  local record = tern.kv.get(key)
+  if record then record.closed = true; tern.kv.set(key, record) end
   if entry then send(cx, entry.target, "hide"); panels[ev.pane] = nil end
+  if next(panels) == nil then
+    if width_timer then width_timer:cancel(); width_timer = nil end
+    if timer and not outline.any() then timer:cancel(); timer = nil end
+  end
 end)
 
 local function restore(cx)
@@ -471,3 +418,8 @@ tern.on("window_start", restore)
 -- window_start runs once per plugin per window, not after every plugin reload.
 -- A fresh VM must recover the existing canvases and restart their refresh timer.
 tern.timer(0, function(cx) if cx then restore(cx) end end)
+
+tern.on("unload", function()
+  if timer then timer:cancel(); timer = nil end
+  if width_timer then width_timer:cancel(); width_timer = nil end
+end)

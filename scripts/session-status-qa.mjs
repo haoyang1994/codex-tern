@@ -70,7 +70,7 @@ try {
   shot('working');
   await wait(async () => (await current())?.completed, 'completion');
   await pause(900); assert.equal((await current()).completed, true, 'no new interaction');
-  assert.ok(text('[data-role="ct.turn.result"]').includes('Task complete'));
+  assert.equal(text('[data-role="ct.turn.result"]').trim(), '');
   shot('complete-unread'); pass('actual terminal completion stays unread while the selected result is shown without new interaction');
   ctl('key ArrowRight');
   await wait(async () => !(await current())?.completed, 'read result');

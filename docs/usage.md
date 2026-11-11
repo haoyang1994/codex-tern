@@ -8,6 +8,8 @@ It opens directly in Tern, or launches Tern from another terminal. A repository 
 
 Each session keeps its own task, output, approvals, queue, model choices and draft. Start a task in one session, switch to another, and start another task. Both continue running. Stop affects the selected session.
 
+Progress replies stay visible while a task runs. When it completes, its progress, thought summaries, plans and tool records collapse together, leaving the final reply expanded. Click the small duration label and arrow to review the full history; hover to see tool counts and error information. Completed tasks also start folded when you reopen the conversation or reload the interface.
+
 Each session also remembers where you were reading, including when you only scroll through history. Switching back restores that message and reading line. A session left at the bottom keeps following new output. Reading positions survive interface reloads while the client stays open; they reset when the client exits. This uses the bundled Tern plugin.
 
 Choose **More actions → New session model** to save a default for new sessions in every workspace. The setting survives a client restart. **Use Codex default** restores the model from Codex configuration. Changing this setting leaves existing sessions and running tasks alone; changing a session's model in the composer does not change the saved default. Resuming or forking a session keeps that session's model settings.
@@ -107,3 +109,8 @@ Use `/skills [search]` or type `$` to find enabled skills for the current worksp
 Click **☆** beside a session to pin it; **★** marks a pinned session and removes the pin when clicked. Pinned sessions appear first, with the existing activity order preserved inside both groups. Pins persist as local preferences alongside language and default model. A session open in another client can be pinned without taking its writer lock. The adjacent **×** still archives the session; archived entries remain hidden even if previously pinned.
 
 This update changes the retained controller and draft format. Existing clients need one restart after their current tasks finish; window reload alone cannot enable it. Run `tern plugin reload` to load updated sidebar controls. Building does not restart or interrupt an existing client.
+
+
+## Context usage
+
+The composer footer shows current context use, native capacity and percentage, for example `Context 48.2k / 200k · 24.1%`. Hover for exact token counts. Data comes from native usage updates, so it can fall after compaction and remains unknown until reported; it is not your cumulative task or subscription usage. The current visible conversation does not add a separate completion label or banner. Background notifications and unread session lights still work.

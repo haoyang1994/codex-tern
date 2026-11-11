@@ -1,0 +1,9 @@
+.ct-host-light {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #454b4e; opacity: 0.2; animation: none; transition: none;
+}
+.ct-host-light-working { background: #00c8ff; }
+.ct-host-light-waiting { background: #f5c542; }
+.ct-host-light-permission, .ct-host-light-failed { background: #ef4444; }
+.ct-host-light-completed { background: #35c76f; }
+.ct-host-light-off, .ct-host-light-on { opacity: 1; }
