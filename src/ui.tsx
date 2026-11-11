@@ -741,15 +741,9 @@ export class NativeUI {
         onClick={() => {
           this.activityModes.set(key, mode === 'expanded' ? 'collapsed' : 'expanded'); this.render();
         }}>
+        <text key="state" role="ct.activity.state" text={this.t(state)} />
+        {(state === 'Failed' || state === 'Disconnected' || errors) && <icon key="error" name="warn" />}
         <icon key="chevron" role="ct.activity.chevron" name={mode === 'expanded' ? 'chev' : 'chev-r'} />
-        <html.span key="indicator" class="ct-activity-indicator">
-          <icon name={state === 'Needs input' ? 'message' : state === 'Stopped' ? 'stop'
-            : state === 'Failed' || state === 'Disconnected' || errors ? 'warn' : live ? 'clock' : 'check'} />
-        </html.span>
-        <html.span key="label" class="ct-activity-label">
-          <text key="state" role="ct.activity.state" text={this.t(state)} />
-          <text key="meta" role="ct.activity.meta" text={`${duration}${summary ? ` · ${summary}` : ''}${errors ? ' · has errors' : ''}`.trim()} />
-        </html.span>
       </html.button>
       {mode === 'expanded' && <col key="details" role="ct.activity.details" gap="sm">{part.entries.map(e => this.renderItem(e))}</col>}
     </html.div>;

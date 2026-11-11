@@ -147,7 +147,9 @@ test('live tool output stays folded across updates while counts, errors and manu
   render();
   assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], false);
   assert.equal(JSON.stringify(main()).includes('LIVE_OUTPUT'), false, 'command and output stay inside details');
-  assert.ok(visible().some(n => n.props.role === 'ct.activity.meta' && String(n.props.text).includes('1 command')));
+  assert.ok(String(toggle().props.title).includes('1 command'));
+  assert.deepEqual(toggle().children.map(n => n.props.role), ['ct.activity.state', 'ct.activity.chevron']);
+  assert.equal(visible().some(n => n.props.role === 'ct.activity.meta' || n.props.class === 'ct-activity-indicator'), false);
   emit('item/commandExecution/outputDelta', { itemId: 'live-command', delta: '\nSTREAMED_OUTPUT' }); render();
   assert.equal(JSON.stringify(main()).includes('STREAMED_OUTPUT'), false, 'streaming never opens the fold');
   await click();
@@ -160,7 +162,7 @@ test('live tool output stays folded across updates while counts, errors and manu
   item('live-command', 'commandExecution', { command: 'echo LIVE_OUTPUT', status: 'completed', exitCode: 0, aggregatedOutput: 'LATER_OUTPUT' });
   item('failed-command', 'commandExecution', { command: 'false', status: 'completed', exitCode: 1 }); render();
   assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], false);
-  assert.ok(visible().some(n => n.props.role === 'ct.activity.meta' && String(n.props.text).includes('2 commands') && String(n.props.text).includes('has errors')));
+  assert.ok(String(toggle().props.title).includes('2 commands') && String(toggle().props.title).includes('has errors'));
   assert.ok(visible().some(n => n.kind === 'icon' && n.props.name === 'warn'));
   item('final', 'agentMessage', { phase: 'final_answer', text: 'Final reply' });
   emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();

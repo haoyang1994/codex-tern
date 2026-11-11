@@ -71,17 +71,24 @@ try {
   const clickToggle = i => { const [x,y,w,h]=tree('.ct-activity-toggle')[i].rect; ctl(`click ${x+w/2} ${y+h/2}`); };
   assert.equal(tree('.ct-activity-preview').length,0,'running work has no output preview');
   assert.equal(tree('[data-role="ct.activity.details"]').length,0,'running work starts collapsed');
-  assert.ok(tree('[data-role="ct.activity.meta"]').some(n=>n.text?.includes('1 command')),'live command count stays visible');
+  assert.equal(tree('[data-role="ct.activity.meta"]').length,0,'running toggle omits visible counters');
+  assert.equal(tree('.ct-activity-indicator').length,0,'running toggle omits leading status housing');
+  assert.ok(tree('.ct-activity-toggle').some(n=>n.title?.includes('1 command')),'live count remains available on hover');
   for (const width of [480,1000]) {
     ctl(`resize ${width} 900`);
-    for (const toggle of tree('.ct-activity-toggle')) assert.ok(toggle.rect[3] <= 40, 'live toggle stays a single row at '+width);
+    for (const toggle of tree('.ct-activity-toggle')) {
+      assert.ok(toggle.rect[3] <= 28, 'live toggle stays short at '+width);
+      assert.ok(toggle.rect[2] < 240, 'live toggle hugs its label at '+width);
+    }
     await evidence('running-collapsed-'+width);
   }
   clickToggle(0); await wait(()=>tree('[data-role="ct.activity.details"]').length===1,'running work opens manually');
   assert.ok(tree('.ct-activity').some(n=>n.text?.includes('QA_TOOL_OUTPUT_ONE')),'live output available on demand');
   await evidence('running-expanded');
   clickToggle(0); await wait(()=>tree('[data-role="ct.activity.details"]').length===0,'running work closes manually');
-  passed.push('running work stays a single collapsed row at 480 and 1000 pixels with counts and on-demand output');
+  ctl('appearance dark'); await pause(150); await evidence('running-dark');
+  ctl('appearance light'); await pause(150);
+  passed.push('running work uses a short content-width text toggle at 480/1000 pixels, with hover metadata and on-demand output');
   passed.push('real native owner renders commentary and public summary outside tool group during streaming; no hidden reasoning');
   const before = await generation(); assert.equal(typeof before,'number');
   ctl('key Control+Shift+r');

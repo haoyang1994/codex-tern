@@ -434,11 +434,19 @@ export const appearanceStyles = css`
     line-height: var(--sf-grid-lh);
   }
   .sf.sf-el.ct-activity .ct-activity-toggle {
-    gap: 8px;
-    min-height: 32px;
-    padding: 6px 0;
-    border-radius: 6px;
-    font-family: var(--tv-font, var(--mono)); font-size: var(--sf-fs); line-height: var(--sf-grid-lh);
+    display: inline-flex;
+    align-self: flex-start;
+    align-items: center;
+    justify-content: flex-start;
+    width: auto;
+    min-height: 24px;
+    gap: 6px;
+    padding: 2px 0;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    box-shadow: none;
+    font-family: var(--ct-prose); font-size: var(--sf-fs); line-height: var(--sf-grid-lh);
   }
   .sf.sf-el.ct-activity [data-role="ct.activity.chevron"] { width: 12px; height: 12px; flex-shrink: 0; }
   .sf.sf-el.ct-activity .ct-activity-indicator {
@@ -459,7 +467,7 @@ export const appearanceStyles = css`
     overflow: hidden;
     white-space: nowrap;
   }
-  .sf.sf-el.ct-activity [data-role="ct.activity.state"] { color: var(--t2); font-weight: 500; flex-shrink: 0; }
+  .sf.sf-el.ct-activity [data-role="ct.activity.state"] { color: var(--t2); font-weight: 400; flex-shrink: 0; }
   .sf.sf-el.ct-activity [data-role="ct.activity.meta"] { color: var(--t3); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .sf.sf-el.ct-activity .ct-activity-preview {
     margin: 0 0 4px 27px;
@@ -509,8 +517,8 @@ export const appearanceStyles = css`
   .sf.sf-row[data-role="ct.composer.actions"] > .sf-icon:active,
   .sf.sf-col[data-role="omp.editor"] [data-role="omp.composer.model"]:active,
   .sf.sf-col[data-role="omp.editor"] [data-role="omp.composer.effort"]:active,
-  .sf.sf-col[data-role="omp.editor"] [data-role="ct.composer.mode"]:active,
-  .sf.sf-el.ct-activity .ct-activity-toggle:active { background: var(--l2); }
+  .sf.sf-col[data-role="omp.editor"] [data-role="ct.composer.mode"]:active { background: var(--l2); }
+  .sf.sf-el.ct-activity .ct-activity-toggle:active { background: transparent; }
   .sf.sf-el.ct-button {
     min-height: 32px;
     padding: 6px 12px;
