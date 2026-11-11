@@ -44,17 +44,17 @@ function setup() {
 
 test('a delivered answer and later steering keep activity live until the turn completes', async t => {
   const { ui, c, emit, item, render } = setup(); t.after(() => ui.close());
-  assert.deepEqual(render(), { states: ['Activity'], spinners: 1, stop: true, previews: 1 });
+  assert.deepEqual(render(), { states: ['Activity'], spinners: 1, stop: true, previews: 0 });
 
   await c.submit('Keep the current core calculus');
   item('steer', 'userMessage', { content: [{ type: 'text', text: 'Keep the current core calculus' }] });
   item('reasoning', 'reasoning', { summary: [] }, false);
-  assert.deepEqual(render(), { states: ['Worked', 'Activity'], spinners: 1, stop: true, previews: 1 });
+  assert.deepEqual(render(), { states: ['Worked', 'Activity'], spinners: 1, stop: true, previews: 0 });
 
   // Finishing individual items still does not finish the turn.
   item('reasoning', 'reasoning', { summary: ['Checking the source rules.'] });
   item('answer', 'agentMessage', { phase: 'final_answer', text: 'The source rules are updated.' });
-  assert.deepEqual(render(), { states: ['Activity'], spinners: 1, stop: true, previews: 1 });
+  assert.deepEqual(render(), { states: ['Activity'], spinners: 1, stop: true, previews: 0 });
 
   emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } });
   assert.deepEqual(render(), { states: ['Worked'], spinners: 0, stop: false, previews: 0 });
@@ -65,9 +65,9 @@ test('input requested after an answer stays visible and returns to Working when 
   item('reasoning', 'reasoning', { summary: [] }, false);
   transport.emit('request', { id: 42, method: 'item/tool/requestUserInput',
     params: { threadId: 'thread', turnId: 'turn', questions: [] } });
-  assert.deepEqual(render(), { states: ['Worked', 'Needs input'], spinners: 0, stop: true, previews: 1 });
+  assert.deepEqual(render(), { states: ['Worked', 'Needs input'], spinners: 0, stop: true, previews: 0 });
   emit('serverRequest/resolved', { requestId: 42 });
-  assert.deepEqual(render(), { states: ['Worked', 'Activity'], spinners: 1, stop: true, previews: 1 });
+  assert.deepEqual(render(), { states: ['Worked', 'Activity'], spinners: 1, stop: true, previews: 0 });
 });
 
 test('continued work shows its actual terminal status after an earlier answer', async t => {
@@ -136,4 +136,34 @@ test('public streamed summary and plan remain visible outside tool folds without
   assert.deepEqual(visible.filter(n => n.kind === 'md').map(n => n.props.text), ['Public progress', 'Public plan progress']);
   assert.ok(visible.filter(n => ['omp.thinking', 'omp.progress.plan'].includes(String(n.props.role))).every(n => !n.props.collapsible && !n.props.collapsed));
   assert.equal(JSON.stringify(main()).includes('HIDDEN_REASONING'), false);
+});
+
+test('live tool output stays folded across updates while counts, errors and manual disclosure remain usable', async t => {
+  const { ui, c, emit, item, render, main } = setup(); t.after(() => ui.close()); c.items = [];
+  item('live-command', 'commandExecution', { command: 'echo LIVE_OUTPUT', status: 'inProgress', aggregatedOutput: 'LIVE_OUTPUT' }, false);
+  const visible = () => nodes(main());
+  const toggle = () => visible().find(n => String(n.props.class).split(' ').includes('ct-activity-toggle'))!;
+  const click = async () => toggle().handlers!.onClick!({ ev: 'action', sf: 'test', id: 'toggle', act: 'click', raw: {} });
+  render();
+  assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], false);
+  assert.equal(JSON.stringify(main()).includes('LIVE_OUTPUT'), false, 'command and output stay inside details');
+  assert.ok(visible().some(n => n.props.role === 'ct.activity.meta' && String(n.props.text).includes('1 command')));
+  emit('item/commandExecution/outputDelta', { itemId: 'live-command', delta: '\nSTREAMED_OUTPUT' }); render();
+  assert.equal(JSON.stringify(main()).includes('STREAMED_OUTPUT'), false, 'streaming never opens the fold');
+  await click();
+  assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], true);
+  assert.ok(visible().some(n => n.kind === 'code' && String(n.props.text).includes('STREAMED_OUTPUT')));
+  emit('item/commandExecution/outputDelta', { itemId: 'live-command', delta: '\nLATER_OUTPUT' }); render();
+  assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], true, 'streaming preserves manual expansion');
+  assert.ok(visible().some(n => n.kind === 'code' && String(n.props.text).includes('LATER_OUTPUT')));
+  await click();
+  item('live-command', 'commandExecution', { command: 'echo LIVE_OUTPUT', status: 'completed', exitCode: 0, aggregatedOutput: 'LATER_OUTPUT' });
+  item('failed-command', 'commandExecution', { command: 'false', status: 'completed', exitCode: 1 }); render();
+  assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], false);
+  assert.ok(visible().some(n => n.props.role === 'ct.activity.meta' && String(n.props.text).includes('2 commands') && String(n.props.text).includes('has errors')));
+  assert.ok(visible().some(n => n.kind === 'icon' && n.props.name === 'warn'));
+  item('final', 'agentMessage', { phase: 'final_answer', text: 'Final reply' });
+  emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();
+  assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], false);
+  assert.deepEqual(visible().filter(n => n.kind === 'md').map(n => n.props.text), ['Final reply']);
 });

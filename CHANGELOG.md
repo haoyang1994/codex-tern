@@ -2,6 +2,12 @@
 
 Notable changes, newest first. This log starts with the update below.
 
+## 2026-11-11
+
+### Changed
+
+- Running command and tool groups start as a single collapsed status row, with counts and error indicators; open them to inspect output without an automatic live preview.
+
 ## 2026-11-10
 
 ### Added

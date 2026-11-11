@@ -26,7 +26,7 @@ import type { ReasoningEffort } from './generated/ReasoningEffort';
 import type { UserInput } from './generated/v2/UserInput';
 import { Welcome, ComposerFrame, WorkingRow } from './omp-views';
 import { ompNode } from './omp-native';
-import { transcriptParts, activitySummary, compactActivity, type TranscriptPart } from './activity';
+import { transcriptParts, activitySummary, type TranscriptPart } from './activity';
 import { appearanceStyles } from './appearance';
 import { assistantMarkdown } from './assistant-markdown';
 import { assistantParts } from './proposals';
@@ -727,7 +727,7 @@ export class NativeUI {
     // A completed turn gets a new default. Opening details during a run never
     // leaves command output expanded after the turn ends.
     const key = `${part.id}:${live ? 'live' : 'ended'}`;
-    const mode = this.activityModes.get(key) ?? (live ? 'compact' : 'collapsed');
+    const mode = this.activityModes.get(key) ?? 'collapsed';
     const errors = part.entries.some(({ item }) => ('status' in item && (item.status === 'failed' || item.status === 'declined'))
       || (item.type === 'commandExecution' && item.exitCode != null && item.exitCode !== 0));
     const state = live ? this.c.requests.length ? 'Needs input' : 'Activity' : turn?.status === 'interrupted' ? 'Stopped'
@@ -735,9 +735,8 @@ export class NativeUI {
     const duration = !live && turn?.durationMs != null ? ` for ${Math.max(1, Math.round(turn.durationMs / 1000))}s` : '';
     const summary = activitySummary(part.entries);
     const label = `${state}${duration}${summary ? ` · ${summary}` : ''}${errors ? ' · has errors' : ''}`;
-    const preview = compactActivity(part.entries.at(-1)!);
     return <html.div key={`activity-${part.id}`} class="ct-activity">
-      <html.button key="toggle" class="ct-activity-toggle" aria={this.t(`${mode === 'expanded' ? 'Hide' : 'Show'} activity details · ${label}`)}
+      <html.button key="toggle" class="ct-activity-toggle" title={this.t(label)} aria={this.t(`${mode === 'expanded' ? 'Hide' : 'Show'} activity details · ${label}`)}
         attrs={{ 'aria-expanded': mode === 'expanded' }}
         onClick={() => {
           this.activityModes.set(key, mode === 'expanded' ? 'collapsed' : 'expanded'); this.render();
@@ -752,10 +751,6 @@ export class NativeUI {
           <text key="meta" role="ct.activity.meta" text={`${duration}${summary ? ` · ${summary}` : ''}${errors ? ' · has errors' : ''}`.trim()} />
         </html.span>
       </html.button>
-      {mode === 'compact' && <html.div key="preview" class="ct-activity-preview">
-        <html.div class={`ct-activity-title ${part.entries.at(-1)!.item.type === 'commandExecution' ? 'ct-activity-command' : ''}`} title={preview.title}>{preview.title}</html.div>
-        {preview.output && <html.pre class="ct-activity-output">{preview.output}</html.pre>}
-      </html.div>}
       {mode === 'expanded' && <col key="details" role="ct.activity.details" gap="sm">{part.entries.map(e => this.renderItem(e))}</col>}
     </html.div>;
   }

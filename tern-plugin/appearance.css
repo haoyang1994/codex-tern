@@ -450,13 +450,14 @@
   .sf.sf-el.ct-activity .ct-activity-indicator .ico { width: 13px; height: 13px; }
   .sf.sf-el.ct-activity .ct-activity-label {
     display: flex;
-    flex-wrap: wrap;
     align-items: baseline;
     gap: 0 8px;
     min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
   }
-  .sf.sf-el.ct-activity [data-role="ct.activity.state"] { color: var(--t2); font-weight: 500; }
-  .sf.sf-el.ct-activity [data-role="ct.activity.meta"] { color: var(--t3); }
+  .sf.sf-el.ct-activity [data-role="ct.activity.state"] { color: var(--t2); font-weight: 500; flex-shrink: 0; }
+  .sf.sf-el.ct-activity [data-role="ct.activity.meta"] { color: var(--t3); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .sf.sf-el.ct-activity .ct-activity-preview {
     margin: 0 0 4px 27px;
     padding: 2px 0 2px 14px;

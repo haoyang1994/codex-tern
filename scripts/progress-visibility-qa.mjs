@@ -68,6 +68,20 @@ try {
   ctl('type "QA_PROGRESS_FIXTURE"'); ctl('key Enter');
   await wait(() => text().includes('正在核对。'), 'streamed progress delta');
   visibleProgress(false); await evidence('streaming-progress');
+  const clickToggle = i => { const [x,y,w,h]=tree('.ct-activity-toggle')[i].rect; ctl(`click ${x+w/2} ${y+h/2}`); };
+  assert.equal(tree('.ct-activity-preview').length,0,'running work has no output preview');
+  assert.equal(tree('[data-role="ct.activity.details"]').length,0,'running work starts collapsed');
+  assert.ok(tree('[data-role="ct.activity.meta"]').some(n=>n.text?.includes('1 command')),'live command count stays visible');
+  for (const width of [480,1000]) {
+    ctl(`resize ${width} 900`);
+    for (const toggle of tree('.ct-activity-toggle')) assert.ok(toggle.rect[3] <= 40, 'live toggle stays a single row at '+width);
+    await evidence('running-collapsed-'+width);
+  }
+  clickToggle(0); await wait(()=>tree('[data-role="ct.activity.details"]').length===1,'running work opens manually');
+  assert.ok(tree('.ct-activity').some(n=>n.text?.includes('QA_TOOL_OUTPUT_ONE')),'live output available on demand');
+  await evidence('running-expanded');
+  clickToggle(0); await wait(()=>tree('[data-role="ct.activity.details"]').length===0,'running work closes manually');
+  passed.push('running work stays a single collapsed row at 480 and 1000 pixels with counts and on-demand output');
   passed.push('real native owner renders commentary and public summary outside tool group during streaming; no hidden reasoning');
   const before = await generation(); assert.equal(typeof before,'number');
   ctl('key Control+Shift+r');
@@ -81,7 +95,6 @@ try {
   assert.deepEqual(order.map(t=>t.match(/QA_PROGRESS_1|QA_PUBLIC_SUMMARY|QA_PROGRESS_2|QA_PLAN|QA_FINAL/)[0]), ['QA_PROGRESS_1','QA_PUBLIC_SUMMARY','QA_PROGRESS_2','QA_PLAN','QA_FINAL']);
   await evidence('finished-collapsed');
   passed.push('terminal default folds hide tools only; progress/summary/plan/final remain ordered and unique');
-  const clickToggle = i => { const [x,y,w,h]=tree('.ct-activity-toggle')[i].rect; ctl(`click ${x+w/2} ${y+h/2}`); };
   for (const i of [0,1]) {
     clickToggle(i); await wait(()=>tree('[data-role="ct.activity.details"]').length===1, 'expanded tool group');
     visibleProgress(true); await evidence('tool-'+i+'-expanded');

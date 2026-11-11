@@ -192,7 +192,7 @@ try {
   await waitFor(() => tree('[data-role="ct.activity.state"]').length === 2, 'continued activity after steering');
   assert.deepEqual(tree('[data-role="ct.activity.state"]').map(n => n.text), ['Worked', 'Activity']);
   assert.equal(tree('[data-role="omp.working"] .sf-spinner').length, 1);
-  assert.ok(text('.ct-activity-preview').includes('Thinking'));
+  assert.equal(tree('.ct-activity-preview').length, 0);
   assert.equal(tree('[data-role="omp.composer.stop"]').length, 1);
   ctl('shot continuing-after-answer');
   await send('QA_FINISH_CONTINUING');
@@ -265,8 +265,12 @@ try {
   await send('hold');
   await waitFor(() => text('.ct-activity').includes('Activity'), 'running activity');
   assert.ok(!text('.ct-activity').includes('Run command'));
-  assert.ok(text('.ct-activity-output').endsWith('QA_OUTPUT_999'));
-  assert.ok(text('.ct-activity-output').length < 100);
+  assert.equal(tree('.ct-activity-preview').length, 0);
+  assert.ok(!text('.ct-activity').includes('QA_OUTPUT_999'));
+  click('.ct-activity-toggle');
+  await waitFor(() => text('.ct-activity').includes('QA_OUTPUT_999'), 'live output available on expansion');
+  click('.ct-activity-toggle');
+  await waitFor(() => !text('.ct-activity').includes('QA_OUTPUT_999'), 'live output collapsed again');
   assert.equal(tree('[data-role="ct.working"]').length, 0, 'no temporary operation duplicates the working row');
   assert.equal(tree('[data-role="omp.working"]').length, 1);
   assert.equal(tree('.ct-activity .sf-spinner').length, 0);
@@ -287,7 +291,7 @@ try {
     ctl(`shot compact-running-${w}`);
   }
   ctl('shot compact-running');
-  pass('bounded live command preview, one Working status, and a unified toolbar at narrow and wide widths');
+  pass('collapsed live command row, optional output details, one Working status, and a unified toolbar at narrow and wide widths');
   type('draft during work');
   const rpcBeforeReload = await readFile(rpcLog, 'utf8');
   const originalUI = await readFile(resolve(clientDist, uiManifest.file), 'utf8');
