@@ -169,3 +169,32 @@ test('live tool output stays folded across updates while counts, errors and manu
   assert.equal((toggle().props.attrs as Record<string, boolean>)['aria-expanded'], false);
   assert.deepEqual(visible().filter(n => n.kind === 'md').map(n => n.props.text), ['Final reply']);
 });
+
+test('opening completed activity leaves each command closed until selected and resets them on reopening', async t => {
+  const { ui, c, emit, item, render, main } = setup(); t.after(() => ui.close()); c.items = [];
+  c.preferences.language = 'zh-CN';
+  item('first', 'commandExecution', { command: 'echo first', status: 'completed', exitCode: 0, aggregatedOutput: 'FIRST_OUTPUT' });
+  // Terminal history may lack an individual item/completed event.
+  item('second', 'commandExecution', { command: 'false', status: 'inProgress', exitCode: 1, aggregatedOutput: 'SECOND_OUTPUT' }, false);
+  item('final', 'agentMessage', { phase: 'final_answer', text: 'Final reply' });
+  emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();
+  const visible = () => nodes(main());
+  const parent = () => visible().find(n => String(n.props.class).split(' ').includes('ct-activity-toggle'))!;
+  const commands = () => visible().filter(n => String(n.props.class).split(' ').includes('ct-command-toggle'));
+  const click = async (node: Node) => node.handlers!.onClick!({ ev: 'action', sf: 'test', id: 'toggle', act: 'click', raw: {} });
+  const output = () => visible().filter(n => n.kind === 'code').map(n => n.props.text);
+  await click(parent());
+  assert.equal(commands().length, 2);
+  assert.deepEqual(output(), []);
+  assert.deepEqual(visible().filter(n => n.props.role === 'ct.command.state').map(n => n.props.text), ['运行了命令', '运行了命令']);
+  assert.ok(nodes(commands()[1]!).some(n => n.kind === 'icon' && n.props.name === 'warn'));
+  await click(commands()[0]!);
+  assert.deepEqual(output(), ['FIRST_OUTPUT']);
+  await click(commands()[1]!);
+  assert.deepEqual(output(), ['FIRST_OUTPUT', 'SECOND_OUTPUT']);
+  await click(commands()[0]!);
+  assert.deepEqual(output(), ['SECOND_OUTPUT']);
+  await click(parent()); await click(parent());
+  assert.deepEqual(output(), [], 'reopening the parent does not reopen previously selected commands');
+  assert.deepEqual(visible().filter(n => n.kind === 'md').map(n => n.props.text), ['Final reply']);
+});

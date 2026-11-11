@@ -104,10 +104,28 @@ try {
   passed.push('terminal default folds hide tools only; progress/summary/plan/final remain ordered and unique');
   for (const i of [0,1]) {
     clickToggle(i); await wait(()=>tree('[data-role="ct.activity.details"]').length===1, 'expanded tool group');
-    visibleProgress(true); await evidence('tool-'+i+'-expanded');
+    visibleProgress(true);
+    const commandToggles = () => tree('.ct-command-toggle');
+    assert.ok(commandToggles().length > 0,'completed commands have independent toggles');
+    assert.equal(tree('[data-role="ct.command.details"]').length,0,'opening activity does not mount command output');
+    const clickCommand = () => { const [x,y,w,h]=commandToggles()[0].rect; ctl(`click ${x+w/2} ${y+h/2}`); };
+    await evidence('tool-'+i+'-expanded');
+    clickCommand(); await wait(()=>tree('[data-role="ct.command.details"]').length===1,'one command opens independently');
+    const expectedOutput = i === 0 ? 'QA_TOOL_OUTPUT_ONE' : 'QA_TOOL_OUTPUT_TWO';
+    assert.ok(tree('[data-role="ct.command.details"]').some(n=>n.text?.includes(expectedOutput)),'selected command output appears');
+    await evidence('command-'+i+'-expanded');
+    clickToggle(i); await wait(()=>tree('[data-role="ct.activity.details"]').length===0,'parent closes with a selected command');
+    clickToggle(i); await wait(()=>tree('[data-role="ct.activity.details"]').length===1,'parent reopens');
+    assert.equal(tree('[data-role="ct.command.details"]').length,0,'reopening parent resets nested command output');
+    const nestedGeneration = await generation(); ctl('key Control+Shift+r');
+    await wait(async () => (await generation()) > nestedGeneration,'reload while activity is open');
+    assert.equal(tree('[data-role="ct.activity.details"]').length,1,'reload retains outer activity disclosure');
+    assert.equal(tree('[data-role="ct.command.details"]').length,0,'reload keeps nested commands closed');
+    visibleProgress(true, true); await evidence('nested-commands-reloaded-'+i);
     clickToggle(i); await wait(()=>tree('[data-role="ct.activity.details"]').length===0, 'collapsed tool group'); visibleProgress(true);
   }
   passed.push('expanding and collapsing each real native tool group cannot hide progress');
+  passed.push('completed commands stay independently folded on activity opening, reopening and native reload; selected output opens on demand');
   const ended = await generation(); ctl('key Control+Shift+r');
   await wait(async () => (await generation()) > ended,'terminal reload'); visibleProgress(true);
   assert.equal(tree('[data-role="ct.activity.details"]').length,0);

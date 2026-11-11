@@ -666,6 +666,10 @@ export class NativeUI {
     </col>;
   }
 
+  private commandModeKey(entry: DisplayItem) {
+    return `command:${JSON.stringify([this.c.thread?.id, entry.turnId, entry.id])}`;
+  }
+
   private renderItem(entry: DisplayItem) {
     const i = entry.item;
     const itemStatus = 'status' in i ? i.status : undefined;
@@ -694,12 +698,31 @@ export class NativeUI {
     if (i.type === 'reasoning') return <section key={entry.id} role={entry.done ? 'omp.thinking' : 'omp.thinking.live'} head={entry.done ? this.t("Thought summary") : this.t("Thinking…")}>
       <md key="text" text={(i.summary ?? []).join('\n\n') || this.t("Thinking…")} stream={!entry.done} />
     </section>;
-    if (i.type === 'commandExecution') return <tool key={entry.id} name="shell" title={this.t("Run command")}
-      target={i.command} targetKind="command" status={status} collapsible collapsed={entry.done}
-      exit={i.exitCode ?? undefined} took={i.durationMs != null ? i.durationMs / 1000 : undefined}
-      meta={[i.cwd ?? '']} preview={{ tail: 8 }}>
-      <code key="out" text={i.aggregatedOutput ?? ''} lang="text" wrap />
-    </tool>;
+    if (i.type === 'commandExecution') {
+      const completed = this.c.turns.get(entry.turnId)?.status === 'completed';
+      const tool = <tool key={entry.id} name="shell" title={this.t("Run command")}
+        target={i.command} targetKind="command" status={status} collapsible={!completed} collapsed={!completed && entry.done}
+        exit={i.exitCode ?? undefined} took={i.durationMs != null ? i.durationMs / 1000 : undefined}
+        meta={[i.cwd ?? '']} preview={{ tail: 8 }}>
+        <code key="out" text={i.aggregatedOutput ?? ''} lang="text" wrap />
+      </tool>;
+      if (!completed) return tool;
+      const key = this.commandModeKey(entry);
+      const expanded = this.activityModes.get(key) === 'expanded';
+      return <html.div key={entry.id} class="ct-command">
+        <html.button key="toggle" class="ct-activity-toggle ct-command-toggle" title={`${i.command}\n${i.cwd ?? ''}`}
+          aria={this.t(expanded ? "Hide command details" : "Show command details")}
+          attrs={{ 'aria-expanded': expanded }} onClick={() => {
+            this.activityModes.set(key, expanded ? 'collapsed' : 'expanded'); this.render();
+          }}>
+          <icon key="command" name="shell" />
+          <text key="label" role="ct.command.state" text={this.t("Ran command")} />
+          {(status === 'error' || (i.exitCode != null && i.exitCode !== 0)) && <icon key="error" name="warn" />}
+          <icon key="chevron" name={expanded ? 'chev' : 'chev-r'} />
+        </html.button>
+        {expanded && <col key="details" role="ct.command.details" gap="sm">{tool}</col>}
+      </html.div>;
+    }
     if (i.type === 'fileChange') return <tool key={entry.id} name="edit" title={this.t("File changes")} status={status} collapsible>
       {(i.changes ?? []).map((f: any, n: number) => <diff key={`f${n}`} text={f.diff} path={f.path} mode="unified" />)}
     </tool>;
@@ -739,6 +762,7 @@ export class NativeUI {
       <html.button key="toggle" class="ct-activity-toggle" title={this.t(label)} aria={this.t(`${mode === 'expanded' ? 'Hide' : 'Show'} activity details · ${label}`)}
         attrs={{ 'aria-expanded': mode === 'expanded' }}
         onClick={() => {
+          if (mode === 'expanded') for (const entry of part.entries) this.activityModes.delete(this.commandModeKey(entry));
           this.activityModes.set(key, mode === 'expanded' ? 'collapsed' : 'expanded'); this.render();
         }}>
         <text key="state" role="ct.activity.state" text={this.t(state)} />

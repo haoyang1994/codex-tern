@@ -6,6 +6,7 @@ Notable changes, newest first. This log starts with the update below.
 
 ### Changed
 
+- Opening a completed task's activity keeps individual commands folded. Open a command separately to inspect its output; reopening the activity starts with those commands folded again.
 - Running command and tool groups use a small text label and trailing chevron without a full-width background. Counts remain available on hover, errors keep a warning icon, and details open on demand without an automatic live preview.
 
 ## 2026-11-10
