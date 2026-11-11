@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawnOwnedRpcChild, closeOwnedRpcChild } from './owned-rpc-process';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import { parseRpcMessage, record, validateResult, type Method, type Params, type Result, type RpcId, type RpcMessage } from './protocol';
@@ -10,7 +11,7 @@ export class RpcError extends Error {
 /** A written request may have taken effect even though no usable reply arrived. */
 export class RpcOutcomeUnknown extends Error {
   override readonly name = 'RpcOutcomeUnknown';
-  constructor(readonly method: Method, readonly requestId: RpcId, message: string) { super(message); }
+  constructor(readonly method: Method | 'server-request/respond', readonly requestId: RpcId, message: string) { super(message); }
 }
 
 /** Reloaded UI bundles have their own constructors; the transport stays alive. */
@@ -39,9 +40,9 @@ export class CodexRpc extends EventEmitter {
   async start() {
     if (this.child) throw new Error('Codex is already started');
     this.closing = false; this.stderrTail = '';
-    const child = this.child = spawn(this.options.binary ?? process.env.CODEX_BINARY ?? 'codex',
+    const child = this.child = spawnOwnedRpcChild(this.options.binary ?? process.env.CODEX_BINARY ?? 'codex',
       ['app-server', ...(this.options.args ?? [])], {
-        cwd: this.options.cwd, env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: this.options.cwd, env: { ...process.env },
       });
     const lines = createInterface({ input: this.child.stdout });
     lines.on('line', line => {
@@ -60,6 +61,7 @@ export class CodexRpc extends EventEmitter {
     this.child.on('error', e => { if (this.child === child) this.fail(e); });
     this.child.on('exit', (code, signal) => {
       lines.close();
+      void closeOwnedRpcChild(child).catch(error => this.emit('diagnostic', error.message));
       if (this.child !== child) return;
       this.connected = false;
       this.owned.clear();
@@ -143,12 +145,6 @@ export class CodexRpc extends EventEmitter {
     this.owned.clear();
     this.fail(new Error('Client closed'));
     const child = this.child;
-    if (!child || !child.pid || child.exitCode !== null || child.signalCode !== null) return;
-    await new Promise<void>(resolve => {
-      const terminate = setTimeout(() => child.kill('SIGTERM'), 1500);
-      const kill = setTimeout(() => child.kill('SIGKILL'), 3000);
-      child.once('exit', () => { clearTimeout(terminate); clearTimeout(kill); resolve(); });
-      child.stdin.end();
-    });
+    if (child) await closeOwnedRpcChild(child);
   }
 }

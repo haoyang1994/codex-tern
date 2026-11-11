@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { Preferences } from '../src/preferences';
 import { Controller } from '../src/controller';
 import { FolderSessions } from '../src/folder-sessions';
 import type { CodexRpc } from '../src/rpc';
@@ -330,4 +334,95 @@ test('repair failure retains the usable indexed list and lets a later refresh re
   assert.equal(list.snapshot.error, '');
   assert.deepEqual(list.snapshot.rows.map(t => t.id), ['current', 'recovered']);
   list.dispose();
+});
+
+test('restart discovers every pinned session beyond page one without advancing normal pagination', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tern-paged-pins-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'preferences.json');
+  const original = new Controller(new Transport() as unknown as CodexRpc, '/tmp/project', new Preferences(path));
+  for (const id of ['pinned-old', 'pinned-oldest', 'archived-pin', 'foreign-pin']) await original.setPinned(id, true);
+  // A new preferences/controller/list instance must discover the persisted pins.
+  const preferences = new Preferences(path); await preferences.load();
+  const rpc = new Transport();
+  const c = new Controller(rpc as unknown as CodexRpc, '/tmp/project', preferences); c.connection = 'ready';
+  const list = new FolderSessions(c, () => {}, async () => new Set(['pinned-old'])); t.after(() => list.dispose());
+  rpc.handler = async p => {
+    assert.equal(p.cwd, '/tmp/project'); assert.equal(p.archived, false);
+    if (p.cursor === 'page2') return { data: [thread('pinned-old', p.cwd, 70), thread('middle', p.cwd, 60)], nextCursor: 'page3' };
+    if (p.cursor === 'page3') return { data: [thread('pinned-oldest', p.cwd, 20), thread('older', p.cwd, 10), thread('foreign-pin', '/other', 90)], nextCursor: 'page4' };
+    if (p.cursor === 'page4') return { data: [thread('unpinned-last', p.cwd, 1)], nextCursor: null };
+    return { data: [thread('recent', p.cwd, 100), thread('tie-a', p.cwd, 80), thread('tie-b', p.cwd, 80)], nextCursor: 'page2' };
+  };
+  const ids = () => list.snapshot.rows.map(r => r.id);
+  await list.refresh();
+  assert.deepEqual(ids(), ['pinned-old', 'pinned-oldest', 'recent', 'tie-a', 'tie-b']);
+  assert.equal(list.snapshot.rows[0].locked, true); assert.equal(list.snapshot.more, true);
+  assert.equal(list.get('pinned-old')?.id, 'pinned-old');
+  assert.ok(!list.contains('middle') && !list.contains('foreign-pin') && !list.contains('archived-pin'));
+  assert.deepEqual(rpc.calls.filter(call => !call.params.useStateDbOnly).map(call => call.params.cursor), [undefined, 'page2', 'page3', 'page4']);
+  assert.ok(rpc.calls.every(call => call.method === 'thread/list'), 'no thread read/resume or history RPC');
+  const count = rpc.calls.length;
+  await list.refresh(true); assert.equal(rpc.calls[count].params.cursor, 'page2');
+  assert.deepEqual(ids(), ['pinned-old', 'pinned-oldest', 'recent', 'tie-a', 'tie-b', 'middle']);
+  await list.refresh(true); assert.equal(rpc.calls.at(-1).params.cursor, 'page3');
+  assert.equal(ids().filter(id => id === 'pinned-oldest').length, 1);
+  assert.deepEqual(ids(), ['pinned-old', 'pinned-oldest', 'recent', 'tie-a', 'tie-b', 'middle', 'older']);
+});
+
+test('supplemental pins disappear when unpinned or no longer returned by the non-archived listing', async t => {
+  const { rpc, c, list } = setup(); t.after(() => list.dispose());
+  await c.setPinned('old', true);
+  let archived = false;
+  rpc.handler = async p => p.cursor
+    ? { data: archived ? [] : [thread('old')], nextCursor: null }
+    : { data: [thread('recent')], nextCursor: 'page2' };
+  await list.refresh(); list.hide(); assert.equal(list.contains('old'), true);
+  await c.setPinned('old', false); assert.equal(list.contains('old'), false);
+  assert.deepEqual(list.snapshot.rows.map(r => r.id), ['current', 'recent']);
+  await c.setPinned('old', true); await list.refresh(); list.hide(); assert.equal(list.contains('old'), true);
+  archived = true; await list.refresh(); assert.equal(list.contains('old'), false);
+  assert.equal(list.snapshot.more, true, 'pin scan did not consume the normal cursor');
+});
+
+test('late supplemental pin pages cannot enter a new cwd and repeated cursors fail visibly', async t => {
+  const { rpc, c, list } = setup(); t.after(() => list.dispose());
+  await c.setPinned('old', true);
+  const oldPage = deferred();
+  rpc.handler = async p => p.cwd !== '/tmp/project'
+    ? { data: [thread('new-saved', p.cwd)], nextCursor: null }
+    : p.cursor ? oldPage.promise : { data: [thread('recent')], nextCursor: 'page2' };
+  const pending = list.refresh(); await tick();
+  c.cwd = '/tmp/new-project'; c.thread = thread('new-current', c.cwd); c.changed(); await tick();
+  oldPage.resolve({ data: [thread('old')], nextCursor: null }); await pending;
+  assert.deepEqual(list.snapshot.rows.map(r => r.id), ['new-current', 'new-saved']);
+  rpc.handler = async () => ({ data: [], nextCursor: 'repeated' });
+  await list.refresh(); assert.match(list.error, /repeated a cursor/);
+});
+
+
+test('traffic light snapshot classifies pending methods without changing work or unread state', t => {
+  const { rpc, c, list } = setup(); t.after(() => list.dispose());
+  c.notifications = false; c.activeTurn = 'turn-traffic';
+  const row = () => list.snapshot.rows.find(row => row.id === 'current')!;
+  assert.equal(row().permission, false);
+  for (const method of ['item/tool/requestUserInput', 'item/commandExecution/requestApproval', 'item/fileChange/requestApproval']) {
+    rpc.emit('request', { id: method, method, params: { threadId: 'current', turnId: 'turn-traffic', questions: [] } });
+    assert.equal(row().waiting, true);
+    assert.equal(row().running, true, 'pending does not erase real running state');
+    assert.equal(row().permission, method !== 'item/tool/requestUserInput');
+    rpc.emit('notification', { method: 'serverRequest/resolved', params: { threadId: 'current', requestId: method } });
+    assert.equal(row().permission, false);
+  }
+  // The display classifier also understands permissions if present in the pending
+  // registry; this does not add transport/UI support for an unsupported RPC.
+  c.requests = [{ id: 1, method: 'item/permissions/requestApproval', params: {}, answers: {} }];
+  assert.equal(row().permission, true);
+  c.requests.push({ id: 2, method: 'item/tool/requestUserInput', params: {}, answers: {} });
+  assert.equal(row().permission, true, 'an approval takes priority over ordinary input');
+  c.requests = [{ id: 3, method: 'future/request', params: {}, answers: {} }];
+  assert.equal(row().waiting, true); assert.equal(row().permission, false, 'unknown waits stay yellow');
+  assert.equal(c.sessionNeedsPermission('another-session'), false);
+  c.requests = []; c.activeTurn = null;
+  assert.equal(row().permission, false); assert.equal(row().waiting, false);
+  assert.equal(row().completed, false, 'idle must not become unread done');
 });

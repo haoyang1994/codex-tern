@@ -1,3 +1,6 @@
+local translate = require("./i18n")
+local language = "en"
+local function t(value) return translate(language, value) end
 -- An independent, movable native card. It follows one client's selected session.
 local toc = require("./toc")
 local outline = {}
@@ -21,8 +24,9 @@ function outline.target(pane) return panels[pane] and panels[pane].target end
 function outline.closed(pane) panels[pane] = nil end
 
 local function paint(cx, pane, entry, snapshot)
+  language = snapshot.language or "en"
   local view = toc.view(snapshot, entry)
-  if not view then view = {k = "text", p = {role = "codex-tern.toc.note", text = "Open a session to see its TOC."}} end
+  if not view then view = {k = "text", p = {role = "codex-tern.toc.note", text = t("Open a session to see its TOC.")}} end
   if tern.json.encode(view) ~= entry.view then
     cx.canvas:set(pane, {view = view}); entry.view = tern.json.encode(view)
   end
@@ -34,7 +38,7 @@ function outline.update(cx, bridge)
     local state = bridge(cx, entry.target)
     if not state then
       if entry.raw ~= "closed" then
-        cx.canvas:set(pane, {view = {k = "text", p = {role = "codex-tern.toc.note", text = "The Codex client is closed."}}})
+        cx.canvas:set(pane, {view = {k = "text", p = {role = "codex-tern.toc.note", text = t("The Codex client is closed.")}}})
         entry.raw = "closed"; entry.view = nil; entry.toc_thread = nil; entry.toc_versions = nil; entry.toc_reveals = nil
       end
     elseif state.raw ~= entry.raw then
@@ -51,6 +55,7 @@ function outline.update(cx, bridge)
   return following
 end
 function outline.open(cx, target, neighbour, state)
+  language = state.snapshot.language or "en"
   outline.remember(cx)
   if state.snapshot.tocProtocol ~= 1 then
     cx:toast("info", "Restart this Codex client to enable the session TOC."); return
@@ -61,8 +66,8 @@ function outline.open(cx, target, neighbour, state)
     end
   end
   local entry = {target = target}
-  local view = toc.view(state.snapshot, entry) or {k = "text", p = {role = "codex-tern.toc.note", text = "Open a session to see its TOC."}}
-  local pane, err = cx.canvas:open({title = "Session TOC", view = view, about = PREFIX .. tostring(target), how = "below", focus = false})
+  local view = toc.view(state.snapshot, entry) or {k = "text", p = {role = "codex-tern.toc.note", text = t("Open a session to see its TOC.")}}
+  local pane, err = cx.canvas:open({title = t("Session TOC"), view = view, about = PREFIX .. tostring(target), how = "below", focus = false})
   if not pane then cx:toast("error", "Could not open session TOC", err); return end
   cx.layout:move(pane, neighbour or target, "down", {focus = false})
   if neighbour then cx.layout:resize(pane, "up", -4) end

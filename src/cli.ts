@@ -6,9 +6,13 @@ import { HELP, VERSION, nativeArgs, parseOptions } from './options';
 import { findExecutable, openTern, focusClient } from './launch';
 import { CodexRpc } from './rpc';
 import { Controller } from './controller';
+import { parseCommand, commandHelp } from './commands';
+import { isLanguage } from './i18n';
 import { RecoveryStore, recoveryPath } from './recovery';
 import { Preferences, preferencesPath } from './preferences';
 import type { ProjectInstance, ProjectCommand } from './project-instance';
+import { attachWeixinOwner, type WeixinOwner } from './weixin-owner';
+import { installChiefGuard } from './weixin-chief-guard';
 
 async function main() {
   const options = parseOptions(process.argv.slice(2));
@@ -25,22 +29,25 @@ async function main() {
   if (!codex) throw new Error(`Codex executable was not found: ${binary}. Install the official Codex CLI and sign in with codex login, or use --codex /path/to/codex.`);
   const projects = options.plain ? null : await import('./project-instance');
   const address = projects ? await projects.projectAddress(options.cwd) : undefined;
-  const command: ProjectCommand = { version: 1, signature: JSON.stringify([codex, options.config]),
+  const command: ProjectCommand = { version: 1, signature: projects?.projectSignature(codex, options.config) ?? '',
     ...(options.resume ? { resume: options.resume } : {}),
     ...(options.prompt !== undefined ? { prompt: options.prompt } : {}) };
   if (projects && address && await projects.contactProject(address, command)) return;
   const rpc = new CodexRpc({ binary: codex, cwd: options.cwd,
     args: ['-c', 'approval_policy="on-request"', '-c', 'approvals_reviewer="auto_review"',
       ...options.config.flatMap(value => ['-c', value])] });
+  installChiefGuard(rpc);
   const c = new Controller(rpc, rpc.options.cwd, new Preferences(preferencesPath()));
   let instance: ProjectInstance | null = null;
   let shuttingDown = false;
+  let weixinOwner: WeixinOwner | undefined;
+  let weixinAttach: Promise<void> | undefined;
   const close = async () => {
     if (shuttingDown) return;
     shuttingDown = true; c.connection = 'disconnected';
     // Keep the project lease until the final journal is saved. A new client
     // must not read an older snapshot while this backend is still closing.
-    try { await rpc.close(); await c.flushRecovery(); await c.flushOutlines(); }
+    try { await weixinAttach; await weixinOwner?.close(); await rpc.close(); await c.flushRecovery(); await c.flushOutlines(); }
     finally { await instance?.close(); }
   };
   try {
@@ -89,6 +96,9 @@ async function main() {
       c.notice(e.message, true); c.connection = rpc.connected ? 'ready' : 'disconnected'; c.changed();
     }).finally(ready);
     const sidebar = ui?.openSidebar().catch(error => c.notice(error.message, true));
+    if (ui) weixinAttach = connection.then(async () => {
+      if (!shuttingDown && c.connection === 'ready') weixinOwner = await attachWeixinOwner(c, () => ui.current.sendMode);
+    });
     if (ui) {
       await ui.run();
     } else {
@@ -119,30 +129,51 @@ async function main() {
       rl.on('SIGINT', () => { if (c.activeTurn) void c.act(() => c.stop()); else rl.close(); });
       rl.prompt();
       for await (const line of rl) {
-        if (line === '/quit') break;
-        // Commands are UI actions. Unknown slash input is sent verbatim to Codex.
+        const parsed = parseCommand(line, [], true);
+        if (parsed.kind === 'command' && parsed.name === 'exit') break;
         await c.act(async () => {
-          if (line === '/help') console.log('/new · /threads · /resume ID · /reconnect · /stop · /queue TEXT · /next · /reply ID JSON · /unconfirmed · /sent ID · /retry ID · /quit');
-          else if (line === '/reconnect') await c.reconnect();
-          else if (line === '/new') await c.newThread();
-          else if (line === '/threads') { await c.listThreads(); console.log(c.threads.map(t => `${t.id}  ${t.name || t.preview}`).join('\n')); }
-          else if (line.startsWith('/resume ')) await c.resume(line.slice(8).trim());
-          else if (line === '/stop') await c.stop();
-          else if (line === '/next') await c.runQueue();
-          else if (line === '/unconfirmed') {
-            await c.refreshHistory();
-            console.log(c.unconfirmed.map(q => `${q.id}  ${q.text || '[Image]'} (${q.images.length} images)`).join('\n'));
-            console.log('Check the conversation, then use /sent ID or /retry ID. Retry only queues the message; /next sends it.');
+          if (parsed.kind === 'error') throw new Error(parsed.message + ' · ' + line);
+          if (parsed.kind === 'text') { await c.submit(line); return; }
+          const { name, args } = parsed;
+          const threads = async () => { await c.listThreads(); console.log(c.threads.map(t => `${t.id}  ${t.name || t.preview}`).join('\n')); };
+          switch (name) {
+            case 'help': console.log(commandHelp(true, c.preferences.language)); break;
+            case 'reconnect': await c.reconnect(); break;
+            case 'new': await c.newThread(); break;
+            case 'threads': await threads(); break;
+            case 'resume': if (args) await c.resume(args); else await threads(); break;
+            case 'model':
+              if (!args) console.log(c.models.filter(m => !m.hidden).map(m => `${m.model}  ${m.displayName}`).join('\n'));
+              else { if (!c.models.some(m => !m.hidden && m.model === args)) throw new Error('Choose an available model.'); c.chooseModel(args); }
+              break;
+            case 'status': console.log(JSON.stringify({ cwd: c.cwd, threadId: c.thread?.id, model: c.model, effort: c.effort, connection: c.connection, activeTurn: c.activeTurn, queued: c.queue.length }, null, 2)); break;
+            case 'language':
+              if (!args) console.log(`Language: ${c.preferences.language} · /language en|zh-CN`);
+              else { if (!isLanguage(args)) throw new Error('Usage: /language en|zh-CN'); await c.preferences.setLanguage(args); }
+              break;
+            case 'skills':
+              console.log((await c.skills.list()).filter(s => `${s.name} ${s.description} ${s.path}`.toLowerCase().includes(args.toLowerCase())).map(s => `$${s.name}  ${s.path}  ${s.description}`).join('\n'));
+              if (c.skills.error) console.error(c.skills.error);
+              break;
+            case 'stop': await c.stop(); break;
+            case 'next': await c.runQueue(); break;
+            case 'unconfirmed':
+              await c.refreshHistory();
+              console.log(c.unconfirmed.map(q => `${q.id}  ${q.text || '[Image]'} (${q.images.length} images)`).join('\n'));
+              console.log('Check the conversation, then use /sent ID or /retry ID. Retry only queues the message; /next sends it.');
+              break;
+            case 'sent': case 'retry':
+              if (!args) throw new Error(`Usage: /${name} ID`);
+              c.resolveUnconfirmed(args, name === 'retry'); break;
+            case 'queue': if (!args) throw new Error('Usage: /queue TEXT'); await c.submit(args, [], 'queue'); break;
+            case 'reply': {
+              const match = /^(\S+) ([\s\S]+)$/.exec(args);
+              if (!match) throw new Error('Usage: /reply ID JSON');
+              const req = c.requests.find(r => String(r.id) === match[1]);
+              if (!req) throw new Error('This request is no longer active');
+              c.answer(req.id, JSON.parse(match[2])); break;
+            }
           }
-          else if (line.startsWith('/sent ')) c.resolveUnconfirmed(line.slice(6).trim());
-          else if (line.startsWith('/retry ')) c.resolveUnconfirmed(line.slice(7).trim(), true);
-          else if (line.startsWith('/queue ')) await c.submit(line.slice(7), [], 'queue');
-          else if (line.startsWith('/reply ')) {
-            const match = line.match(/^\/reply (\S+) ([\s\S]+)$/);
-            if (!match) throw new Error('Usage: /reply ID JSON');
-            const req = c.requests.find(r => String(r.id) === match[1]);
-            if (!req) throw new Error('This request is no longer active'); c.answer(req.id, JSON.parse(match[2]));
-          } else await c.submit(line);
         });
         rl.prompt();
       }

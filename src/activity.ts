@@ -3,13 +3,14 @@ import type { DisplayItem } from './controller';
 export type TranscriptPart = { kind: 'message'; entry: DisplayItem }
   | { kind: 'activity'; id: string; turnId: string; entries: DisplayItem[] };
 
-/** Keep user messages and answers in place; group the work between them. */
+/** Keep public progress and messages in order; fold only the intervening work. */
 export function transcriptParts(items: DisplayItem[]): TranscriptPart[] {
   const parts: TranscriptPart[] = [];
   for (const entry of items) {
     const i = entry.item;
     if (i.type === 'reasoning' && entry.done && !(i.summary ?? []).join('').trim()) continue;
-    const message = i.type === 'userMessage' || (i.type === 'agentMessage' && i.phase !== 'commentary');
+    const message = i.type === 'userMessage' || i.type === 'agentMessage' || i.type === 'plan'
+      || (i.type === 'reasoning' && !!(i.summary ?? []).join('').trim());
     const last = parts.at(-1);
     if (message) parts.push({ kind: 'message', entry });
     else if (last?.kind === 'activity' && last.turnId === entry.turnId) last.entries.push(entry);

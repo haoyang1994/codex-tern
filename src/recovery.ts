@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { SkillInput } from './skills';
 
-export interface SavedInput { id: string; text: string; images: string[] }
-export interface SavedDraft { text: string; images: string[] }
+export interface SavedInput extends SavedDraft { id: string }
+export interface SavedDraft { text: string; images: string[]; skills?: SkillInput[] }
 export interface PendingForkTitle { name: string | null; turnId: string }
 export interface SavedSession {
   id: string; cwd: string; name?: string; preview?: string;
@@ -22,7 +23,9 @@ export function recoveryPath(projectAddress: string) {
 
 const object = (x: unknown): x is Record<string, any> => !!x && typeof x === 'object' && !Array.isArray(x);
 const draft = (x: unknown): x is SavedDraft => object(x) && typeof x.text === 'string'
-  && Array.isArray(x.images) && x.images.every((p: unknown) => typeof p === 'string');
+  && Array.isArray(x.images) && x.images.every((p: unknown) => typeof p === 'string')
+  && (x.skills === undefined || (Array.isArray(x.skills) && x.skills.every((s: unknown) => object(s)
+    && s.type === 'skill' && typeof s.name === 'string' && !!s.name && typeof s.path === 'string' && !!s.path)));
 const input = (x: unknown): x is SavedInput => draft(x) && typeof (x as SavedInput).id === 'string';
 function validate(value: unknown): asserts value is RecoveryData {
   if (!object(value) || value.version !== 1 || typeof value.notifications !== 'boolean'

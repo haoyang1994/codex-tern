@@ -47,6 +47,15 @@ test('TOC sizing uses its own card and missing or hidden transcript geometry is 
   assert.equal(readingFocus([element('tv', 0, 0), element('tv-grid', 0, 0), element('sf-main', 0, 0)]), undefined);
 });
 
+test('result receipts require the entire marker to fit above the native dock', () => {
+  const layout = [element('tv', 0, 700), element('tv-grid', 20, 680), element('sf-main', 20, 900),
+    element(`sf-el ${readingAnchorClass('main.result:turn')}`, 575, 22), element('sf-dock', 590, 110)];
+  assert.deepEqual(readingFocus(layout)?.visible, ['main.result:turn']);
+  assert.deepEqual(readingFocus(layout)?.fullyVisible, [], 'a clipped marker is not a receipt');
+  layout[3]!.rect[1] = 560;
+  assert.deepEqual(readingFocus(layout)?.fullyVisible, ['main.result:turn']);
+});
+
 test('a leftover reply footer cannot hold the old topic after the actual answer has left the viewport', () => {
   const layout = [element('tv scrolled', 45, 844), element('tv-grid', 55, 834), element('sf-main', -1207, 3000),
     element(`sf-el ${readingAnchorClass('main.previous-reply')}`, -1207, 1304), element('sf sf-md', -1207, 1260),

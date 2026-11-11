@@ -14,6 +14,7 @@ import { AuxiliaryAgent } from './auxiliary-agent';
 import { SessionOutlines } from './session-outlines';
 import { outlineTurns } from './session-outline';
 import { Preferences } from './preferences';
+import { Skills, skillNames, type SkillInput } from './skills';
 export type { DisplayItem, PendingRequest, QueuedInput, Notice } from './conversation';
 export interface Completion { threadId: string; turnId: string; title: string; status: 'completed' | 'failed' }
 
@@ -29,7 +30,9 @@ export class Controller extends EventEmitter {
   private recoveryError = '';
   private reconnecting?: Promise<void>;
   private metadataVersion = 0;
+  private ownerEpoch = 0;
   private readonly unread = new Map<string, Completion>();
+  private readonly results = new Map<string, Completion>();
   private readonly titles: SessionTitles;
   private readonly auxiliary: AuxiliaryAgent;
   private outlines?: SessionOutlines;
@@ -37,9 +40,15 @@ export class Controller extends EventEmitter {
   private readonly titleChanges = new Map<string, { name: string; revision: string }>();
   private readonly nameWrites = new Map<string, Promise<void>>();
   notifications = true;
+  readonly skills: Skills;
 
   constructor(readonly rpc: CodexRpc, cwd: string, readonly preferences = new Preferences()) {
     super();
+    this.skills = new Skills(rpc, () => this.cwd, () => this.changed());
+    rpc.on('notification', (message: RpcMessage) => {
+      if (['thread/settings/updated', 'thread/goal/updated', 'thread/goal/cleared', 'thread/reverted'].includes(message.method ?? '')) this.ownerEpoch++;
+      if (message.method === 'skills/changed') { this.skills.invalidate(); this.changed(); }
+    });
     this.auxiliary = new AuxiliaryAgent(() => rpc.createPeer());
     this.titles = new SessionTitles(this.auxiliary);
     this.selected = this.create(cwd);
@@ -66,19 +75,25 @@ export class Controller extends EventEmitter {
       this.globalDiagnostics.push(text); this.globalDiagnostics = this.globalDiagnostics.slice(-30);
     });
     rpc.on('disconnected', (text: string) => {
+      this.ownerEpoch++;
       this.metadataVersion++;
       this.cancelTitles();
       this.outlines?.cancelAll();
       for (const conversation of this.all()) {
         conversation.connection = 'disconnected'; conversation.activeTurn = null;
         conversation.hydrated = false;
-        conversation.requests = []; conversation.queuePaused = true; conversation.notice(text, true);
+        conversation.invalidateRequests(); conversation.queuePaused = true; conversation.notice(text, true);
       }
     });
-    rpc.on('closing', () => { this.metadataVersion++; this.cancelTitles(); this.outlines?.cancelAll(); });
+    rpc.on('closing', () => { this.ownerEpoch++; this.metadataVersion++; this.cancelTitles(); this.outlines?.cancelAll(); });
   }
 
   private all() { return new Set([this.selected, ...this.conversations.values()]); }
+  get ownerGeneration() { return this.ownerEpoch; }
+  controlledConversations() {
+    return [...this.all()].filter(c => c.thread && c.hydrated && c.connection === 'ready'
+      && !this.isArchived(c.thread.id) && this.rpc.ownsThread?.(c.thread.id));
+  }
   private find(id: string) { return this.conversations.get(id) ?? (this.thread?.id === id ? this.selected : undefined); }
   /** Register before any await. Requests and replies always reach the same owner. */
   private conversation(id: string) {
@@ -144,6 +159,10 @@ export class Controller extends EventEmitter {
     }
     let previous = '';
     conversation.on('activity', () => { this.sessionsVersion++; });
+    conversation.on('terminal', ({ turn, at }: { turn: Turn; at: string }) => {
+      if (conversation.thread && this.controlledConversations().includes(conversation))
+        this.emit('ownerTerminal', { session: conversation.thread.id, turn: turn.id, kind: turn.status, at });
+    });
     conversation.on('firstInput', (text: string, previousName: string | null) => { void this.generateTitle(conversation, text, previousName); });
     conversation.on('outlineChanged', () => {
       if (conversation.thread && this.connection === 'ready' && !this.isArchived(conversation.thread.id))
@@ -156,10 +175,14 @@ export class Controller extends EventEmitter {
       const event: Completion = { threadId: conversation.thread.id, turnId: turn.id,
         title: conversation.thread.name || conversation.thread.preview || 'Codex', status: turn.status as Completion['status'] };
       this.unread.set(event.threadId, event);
+      this.results.set(event.threadId, event);
       this.emit('completion', event);
     });
     conversation.on('change', () => {
-      if (conversation.activeTurn && conversation.thread) this.unread.delete(conversation.thread.id);
+      if (conversation.activeTurn && conversation.thread) {
+        this.unread.delete(conversation.thread.id);
+        this.results.delete(conversation.thread.id);
+      }
       this.saveConversation(conversation);
       const status = JSON.stringify([conversation.thread?.name, conversation.activeTurn, conversation.operation,
         conversation.requests.length, conversation.queue.length, conversation.unconfirmed.length, conversation.endedTurns.size, conversation.thread?.recencyAt]);
@@ -238,6 +261,11 @@ export class Controller extends EventEmitter {
     return { running: !!c?.activeTurn, waiting: !!(c?.requests.length || c?.unconfirmed.length),
       completed: this.unread.get(id)?.status === 'completed', failed: this.unread.get(id)?.status === 'failed' };
   }
+  sessionNeedsPermission(id: string) {
+    return !!this.find(id)?.requests.some(request => [
+      'item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval',
+    ].includes(request.method));
+  }
   sessionHasContent(id: string) {
     const c = this.find(id);
     return !!(c?.items.length || c?.activeTurn || c?.requests.length || c?.queue.length || c?.unconfirmed.length);
@@ -251,12 +279,25 @@ export class Controller extends EventEmitter {
       && !conversation?.busy && !conversation?.requests.length && !conversation?.queue.length && !conversation?.unconfirmed.length;
   }
   changed() {
+    this.skills.sync();
     if (this.thread?.id) this.recovery?.select(this.thread.id);
     this.emit('change');
   }
-  markRead(id: string) { if (this.unread.delete(id)) this.changed(); }
+  sessionResult(id: string) { return this.results.get(id); }
+  unreadResult(id: string) { return this.unread.get(id); }
+  markRead(id: string, result: Completion) {
+    // A late viewport inspection must never consume a newer result or another session.
+    if (this.thread?.id !== id || this.unread.get(id) !== result || this.sessionStatus(id).running
+      || this.sessionStatus(id).waiting) return;
+    this.unread.delete(id); this.changed();
+  }
   setNotifications(enabled: boolean) { this.notifications = enabled; this.recovery?.setNotifications(enabled); this.changed(); }
   get newSessionModel() { return this.preferences.model; }
+  isPinned(id: string) { return this.preferences.pinned.includes(id); }
+  async setPinned(id: string, pinned: boolean) {
+    if (!id || this.isArchived(id)) return;
+    await this.preferences.setPinned(id, pinned); this.sessionsVersion++; this.changed();
+  }
   useOutlines(directory?: string) { this.outlines = new SessionOutlines(this.auxiliary, this.rpc, () => this.changed(), directory); }
   get outline() { return this.outlines?.snapshot(this.thread?.id); }
   private auxiliaryModel(conversation: Conversation) {
@@ -327,10 +368,10 @@ export class Controller extends EventEmitter {
   sessionNotice(id: string | undefined, text: string, error = false) {
     (id ? this.find(id) : this.selected)?.notice(text, error);
   }
-  preserveInput(id: string | undefined, text: string, images: string[]) {
+  preserveInput(id: string | undefined, text: string, images: string[], skills: SkillInput[] = []) {
     const conversation = id ? this.find(id) : this.selected;
     if (!conversation) return;
-    conversation.queue.unshift({ id: randomUUID(), text, images });
+    conversation.queue.unshift({ id: randomUUID(), text, images, ...(skills.length ? { skills: structuredClone(skills) } : {}) });
     conversation.queuePaused = true; conversation.changed();
   }
   async act(action: () => Promise<unknown>) {
@@ -361,6 +402,7 @@ export class Controller extends EventEmitter {
   }
 
   async connect(resumeId?: string, fresh = false) {
+    this.ownerEpoch++;
     try { await this.preferences.load(); }
     catch (error) { this.notice(`Could not read new session preferences: ${(error as Error).message}`, true); }
     await this.rpc.start();
@@ -385,7 +427,7 @@ export class Controller extends EventEmitter {
     this.navigation = 'Reconnecting…'; this.connection = 'connecting'; this.changed();
     try {
       for (const conversation of this.all()) {
-        conversation.hydrated = false; conversation.queuePaused = true; conversation.requests = [];
+        conversation.hydrated = false; conversation.queuePaused = true; conversation.invalidateRequests();
         conversation.resetHistory();
       }
       await this.rpc.restart();
@@ -532,7 +574,7 @@ export class Controller extends EventEmitter {
       await this.rpc.request('thread/archive', { threadId: id });
       this.archived.add(id);
       await this.outlines?.remove(id).catch(() => {});
-      this.recovery?.remove(id); this.unread.delete(id);
+      this.recovery?.remove(id); this.unread.delete(id); this.results.delete(id);
       this.titleChanges.delete(id);
       this.conversations.delete(id);
       if (next) { next.hydrated = true; this.selected = next; this.remember(next); }
@@ -551,10 +593,15 @@ export class Controller extends EventEmitter {
   loadHistory() { return this.selected.loadHistory(); }
   refreshHistory() { return this.selected.refreshHistory(); }
   resolveUnconfirmed(id: string, retry = false) { this.selected.resolveUnconfirmed(id, retry); }
-  submit(text: string, images: string[] = [], mode: 'steer' | 'queue' = 'steer') {
+  submit(text: string, images: string[] = [], mode: 'steer' | 'queue' = 'steer', skills?: SkillInput[]) {
     if (this.selecting) return Promise.reject(new Error('Wait for the session to finish opening'));
     if (!this.sessionReady) return Promise.reject(new Error('Reconnect and open this session before sending.'));
-    return this.selected.submit(text, images, mode);
+    const selected = this.selected;
+    if (skills !== undefined || !skillNames(text).length) return selected.submit(text, images, mode, undefined, skills);
+    return this.skills.resolve(text).then(resolved => {
+      if (this.selected !== selected) throw new Error('Skills workspace changed. Try again.');
+      return selected.submit(text, images, mode, undefined, resolved);
+    });
   }
   stop() { return this.selected.stop(); }
   runQueue() {
@@ -564,5 +611,5 @@ export class Controller extends EventEmitter {
   removeQueued(id: string) { this.selected.removeQueued(id); }
   chooseModel(id: string) { this.selected.chooseModel(id); }
   chooseEffort(effort: ReasoningEffort) { this.selected.chooseEffort(effort); }
-  answer(id: RpcId, result: unknown) { this.selected.answer(id, result); }
+  answer(id: RpcId, result: unknown, expected?: import('./conversation').PendingRequest) { this.selected.answer(id, result, expected); }
 }

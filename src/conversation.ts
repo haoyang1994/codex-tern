@@ -12,13 +12,14 @@ import type { ThreadStartResponse } from './generated/v2/ThreadStartResponse';
 import type { ReasoningEffort } from './generated/ReasoningEffort';
 import type { UserInput } from './generated/v2/UserInput';
 import type { Turn } from './generated/v2/Turn';
+import type { SkillInput } from './skills';
 
 export interface DisplayItem {
   id: string; turnId: string; item: ThreadItem; done: boolean;
   delivery?: 'sending' | 'accepted';
 }
 export interface PendingRequest { id: RpcId; method: string; params: any; answers: Record<string, string[]> }
-export interface QueuedInput { id: string; text: string; images: string[] }
+export interface QueuedInput { id: string; text: string; images: string[]; skills?: SkillInput[] }
 export interface Notice { id: number; text: string; error: boolean }
 
 /** Disposable view state. Codex owns history, config, permissions and execution. */
@@ -41,6 +42,7 @@ export class Conversation extends EventEmitter {
   threadsCursor: string | null = null;
   historyCursor: string | null = null;
   activeTurn: string | null = null;
+  inputVersion = 0;
   operation = '';
   notices: Notice[] = [];
   diagnostics: string[] = [];
@@ -59,6 +61,9 @@ export class Conversation extends EventEmitter {
   private historyRead?: Promise<void>;
   private readonly partialItems = new Set<string>();
   private readonly itemVersions = new Map<string, number>();
+  private readonly consumedRequests = new Set<string>();
+  private requestKey(id: RpcId, turn: unknown) { return JSON.stringify([turn ?? null, id]); }
+  invalidateRequests() { this.requests = []; this.consumedRequests.clear(); }
 
   constructor(readonly rpc: CodexRpc, public cwd: string) {
     super();
@@ -186,15 +191,16 @@ export class Conversation extends EventEmitter {
     this.historyCursor = page.nextCursor; this.changed();
   }
 
-  async submit(text: string, images: string[] = [], mode: 'steer' | 'queue' = 'steer', queuedId?: string) {
+  async submit(text: string, images: string[] = [], mode: 'steer' | 'queue' = 'steer', queuedId?: string, skills: SkillInput[] = [], beforeWrite?: () => void) {
     if (!text.trim() && !images.length) return;
     if (!this.thread || this.connection !== 'ready') throw new Error('The session is not ready yet');
     if (this.unconfirmed.length) throw new Error('Check the unconfirmed message before sending again.');
     if (this.operation) throw new Error('Wait for the current operation to finish');
+    beforeWrite?.();
     if (mode === 'queue' && this.activeTurn) {
-      const queued = { id: randomUUID(), text, images: [...images] };
+      const queued = { id: randomUUID(), text, images: [...images], ...(skills.length ? { skills: structuredClone(skills) } : {}) };
       this.operation = 'Queuing…'; this.queue.push(queued); this.changed();
-      try { if (this.checkpoint) await this.checkpoint(); }
+      try { if (this.checkpoint) await this.checkpoint(); beforeWrite?.(); this.inputVersion++; }
       catch (error) { this.queue = this.queue.filter(q => q.id !== queued.id); this.queuePaused = true; this.changed(); throw error; }
       finally {
         this.operation = ''; this.changed();
@@ -206,6 +212,7 @@ export class Conversation extends EventEmitter {
     const input: UserInput[] = [
       ...(text ? [{ type: 'text' as const, text, text_elements: [] }] : []),
       ...images.map(path => ({ type: 'localImage' as const, path })),
+      ...structuredClone(skills),
     ];
     const threadId = this.thread.id;
     const previousName = this.thread.name?.trim() || null;
@@ -214,7 +221,7 @@ export class Conversation extends EventEmitter {
       || (!previousName && !this.thread.preview?.trim()
         && !this.thread.forkedFromId && this.turns.size === 0 && this.items.length === 0);
     const turnId = this.activeTurn;
-    const outgoing = { id: queuedId ?? randomUUID(), text, images: [...images] };
+    const outgoing = { id: queuedId ?? randomUUID(), text, images: [...images], ...(skills.length ? { skills: structuredClone(skills) } : {}) };
     const pending: DisplayItem | undefined = turnId ? {
       id: `${turnId}:local:${outgoing.id}`, turnId, done: false, delivery: 'sending',
       item: { id: outgoing.id, type: 'userMessage', clientId: outgoing.id, content: input },
@@ -228,6 +235,7 @@ export class Conversation extends EventEmitter {
       }
       if (this.checkpoint) await this.checkpoint();
       if (this.connection !== 'ready') throw new Error('Codex disconnected before this message was sent.');
+      beforeWrite?.();
       if (turnId) {
         await this.rpc.request('turn/steer', { threadId, expectedTurnId: turnId,
           clientUserMessageId: outgoing.id, input });
@@ -243,6 +251,7 @@ export class Conversation extends EventEmitter {
         if (!this.endedTurns.has(result.turn.id)) this.activeTurn = result.turn.id;
       }
       if (queuedId) this.queue = this.queue.filter(q => q.id !== queuedId);
+      this.inputVersion++;
       const nameFirstInput = firstInput && (!forkTitle || this.pendingForkTitle === forkTitle);
       this.pendingForkTitle = undefined;
       // A new conversation belongs in history only after its first accepted input.
@@ -275,7 +284,7 @@ export class Conversation extends EventEmitter {
     const next = this.queue[0];
     this.draining = true;
     try {
-      await this.submit(next.text, next.images, 'steer', next.id);
+      await this.submit(next.text, next.images, 'steer', next.id, next.skills);
       this.queue = this.queue.filter(q => q.id !== next.id); this.changed();
     } catch (error) {
       // submit retained this input separately. It must no longer be runnable.
@@ -312,14 +321,23 @@ export class Conversation extends EventEmitter {
     this.effortOverride = effort; this.changed();
   }
 
-  answer(id: RpcId, result: unknown) {
+  answer(id: RpcId, result: unknown, expected?: PendingRequest) {
     const request = this.requests.find(r => r.id === id);
-    if (!request || this.connection !== 'ready') throw new Error('This request is no longer active');
-    this.rpc.respond(id, result);
+    if (!request || (expected && request !== expected) || this.connection !== 'ready'
+      || (request.params.turnId && (this.endedTurns.has(request.params.turnId)
+        || (this.activeTurn && this.activeTurn !== request.params.turnId)))) throw new Error('This request is no longer active');
+    // Consume before writing: a racing UI/relay decision cannot answer twice,
+    // even if the transport write has an uncertain outcome.
+    this.consumedRequests.add(this.requestKey(id, request.params.turnId));
     this.requests = this.requests.filter(r => r.id !== id); this.changed();
+    try { this.rpc.respond(id, result); }
+    catch { throw new RpcOutcomeUnknown('server-request/respond', id, 'Request response delivery is uncertain; check the original session. It was not retried.'); }
   }
 
   onRequest(message: RpcMessage) {
+    if (this.consumedRequests.has(this.requestKey(message.id!, message.params?.turnId))
+      || (message.params?.turnId && (this.endedTurns.has(message.params.turnId)
+        || (this.activeTurn && this.activeTurn !== message.params.turnId)))) return;
     const supported = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval',
       'item/tool/requestUserInput', 'mcpServer/elicitation/request'];
     if (!supported.includes(message.method!) ||
@@ -327,8 +345,11 @@ export class Conversation extends EventEmitter {
       this.rpc.rejectRequest(message.id!, `codex-tern prototype does not support ${message.method}`);
       this.notice(`${message.method} is not supported yet. An error was returned; no permission was granted.`, true); return;
     }
-    if (!this.requests.some(request => request.id === message.id))
+    const previous = this.requests.find(request => request.id === message.id);
+    if (!previous || previous.method !== message.method || JSON.stringify(previous.params) !== JSON.stringify(message.params)) {
+      this.requests = this.requests.filter(request => request.id !== message.id);
       this.requests.push({ id: message.id!, method: message.method!, params: message.params, answers: {} });
+    }
     this.changed();
   }
 
@@ -351,13 +372,17 @@ export class Conversation extends EventEmitter {
 
   onNotification({ method, params: p }: RpcMessage) {
     if (method === 'serverRequest/resolved') {
+      for (const r of this.requests) if (r.id === p.requestId) this.consumedRequests.add(this.requestKey(r.id, r.params.turnId));
       this.requests = this.requests.filter(r => r.id !== p.requestId); this.changed(); return;
     }
     if (p?.threadId && p.threadId !== this.thread?.id) return;
     let outlineChanged = false;
     switch (method) {
       case 'turn/started':
-        if (!this.endedTurns.has(p.turn.id)) { this.activeTurn = p.turn.id; this.turns.set(p.turn.id, p.turn); }
+        if (!this.endedTurns.has(p.turn.id)) {
+          this.requests = this.requests.filter(r => !r.params.turnId || r.params.turnId === p.turn.id);
+          this.activeTurn = p.turn.id; this.turns.set(p.turn.id, p.turn);
+        }
         break;
       case 'turn/completed': {
         const firstCompletion = !this.endedTurns.has(p.turn.id);
@@ -371,6 +396,11 @@ export class Conversation extends EventEmitter {
         if (p.turn.error) this.notice(p.turn.error.message, true);
         if (p.turn.status !== 'completed') this.queuePaused = true;
         if (firstCompletion) this.completion = p.turn;
+        if (firstCompletion && ['completed', 'failed'].includes(p.turn.status)) {
+          const timestamp = typeof p.turn.completedAt === 'number' ? p.turn.completedAt * 1000 : NaN;
+          const at = Number.isFinite(timestamp) && Math.abs(timestamp) <= 8.64e15 ? timestamp : Date.now();
+          this.emit('terminal', { turn: p.turn, at: new Date(at).toISOString() });
+        }
         outlineChanged = firstCompletion;
         if (this.queue.length && !this.queuePaused)
           setTimeout(() => void this.act(() => this.runQueue()), 0);

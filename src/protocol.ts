@@ -15,6 +15,7 @@ import type { ThreadSetNameResponse } from './generated/v2/ThreadSetNameResponse
 import type { TurnStartResponse } from './generated/v2/TurnStartResponse';
 import type { TurnSteerResponse } from './generated/v2/TurnSteerResponse';
 import type { TurnInterruptResponse } from './generated/v2/TurnInterruptResponse';
+import type { SkillsListResponse } from './generated/v2/SkillsListResponse';
 export type Method = ClientRequest['method'];
 export type Params<M extends Method> = Extract<ClientRequest, { method: M }>['params'];
 export type RpcId = string | number;
@@ -22,6 +23,7 @@ interface Responses {
   initialize: InitializeResponse;
   'account/read': GetAccountResponse;
   'model/list': ModelListResponse;
+  'skills/list': SkillsListResponse;
   'config/read': ConfigReadResponse;
   'thread/start': ThreadStartResponse;
   'thread/resume': ThreadResumeResponse;
@@ -125,6 +127,11 @@ export function validateResult(method: Method, value: unknown): void {
   if (method === 'turn/start' && (!record(value.turn) || typeof value.turn.id !== 'string')) throw new Error('Invalid turn/start turn');
   if (['model/list', 'thread/list', 'thread/turns/list'].includes(method) && !Array.isArray(value.data))
     throw new Error(`Invalid ${method} page`);
+  if (method === 'skills/list' && (!Array.isArray(value.data) || !value.data.every(e => record(e)
+    && typeof e.cwd === 'string' && Array.isArray(e.skills) && e.skills.every(s => record(s)
+      && typeof s.name === 'string' && typeof s.path === 'string' && typeof s.description === 'string' && typeof s.enabled === 'boolean')
+    && Array.isArray(e.errors) && e.errors.every(error => record(error) && typeof error.path === 'string' && typeof error.message === 'string'))))
+    throw new Error('Invalid skills/list result');
   if (method === 'thread/turns/list') (value.data as unknown[]).forEach(turn => validateTurn(turn, true));
   if (method === 'thread/list' && !(value.data as unknown[]).every(t => record(t)
     && typeof t.id === 'string' && typeof t.cwd === 'string')) throw new Error('Invalid thread list');

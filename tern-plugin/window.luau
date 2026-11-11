@@ -1,3 +1,6 @@
+local translate = require("./i18n")
+local language = "en"
+local function t(value) return translate(language, value) end
 -- The client owns Codex RPC. This panel reads only its explicit list snapshot
 -- and sends UI actions back through Tern; it never sends a prompt or starts Codex.
 local PREFIX = "codex-tern.sessions/v1:"
@@ -29,6 +32,7 @@ local function bridge(cx, target)
   if not node or not node.p or not node.p.title then return nil end
   local decoded, snapshot = pcall(tern.json.decode, node.p.title)
   if not decoded or snapshot.version ~= 1 or type(snapshot.rows) ~= "table" then return nil end
+  language = snapshot.language or "en"
   return {sf = tree.surface.id, snapshot = snapshot, raw = node.p.title}
 end
 
@@ -40,18 +44,24 @@ local function send(cx, target, act, value)
 end
 
 local function view(snapshot, selection, reveals)
+  local function t(value) return translate(snapshot.language, value) end
   local rows = {}
   local current = snapshot.current
-  local folder = string.match(snapshot.cwd or "", "([^/]+)/*$") or snapshot.cwd or "Sessions"
+  local folder = string.match(snapshot.cwd or "", "([^/]+)/*$") or snapshot.cwd or t("Sessions")
   table.insert(rows, {k = "text", p = {key = "folder", role = "codex-tern.sessions.folder", text = folder, title = snapshot.cwd}})
   table.insert(rows, {k = "row", p = {key = "new", role = "codex-tern.sessions.new", align = "center", gap = "sm",
-    title = "New session · Ctrl+Shift+N", mark = if snapshot.canSwitch then nil else "disabled",
+    title = t("New session · Ctrl+Shift+N"), mark = if snapshot.canSwitch then nil else "disabled",
     actions = if snapshot.canSwitch then {click = "new"} else nil}, c = {
       {k = "icon", p = {key = "icon", name = "plus"}},
-      {k = "text", p = {key = "label", text = "New session"}},
+      {k = "text", p = {key = "label", text = t("New session")}},
     }})
   for _, item in snapshot.rows do
     local locked = item.locked and item.id ~= snapshot.current
+    local status = if locked then nil elseif item.waiting then (if item.permission then "permission" else "waiting") elseif item.running then "working"
+      elseif item.failed then "failed" elseif item.completed then "completed" else "off"
+    local status_text = if status == "working" then t("Working") elseif status == "waiting" then t("Needs your input")
+      elseif status == "permission" then t("Waiting for permission")
+      elseif status == "failed" then t("Task failed · Open to review") elseif status == "completed" then t("Task complete · Unread") else t("Lights off")
     local reveal = reveals and item.titleRevision and reveals[item.id] == item.titleRevision
     local title = {k = "row", p = {key = "heading", align = "center", gap = "sm"}, c = {
       {k = "col", p = {key = "title", role = "codex-tern.sessions.title",
@@ -63,38 +73,56 @@ local function view(snapshot, selection, reveals)
       }},
     }}
     if locked then
-      table.insert(title.c, {k = "icon", p = {key = "status", name = "lock", role = "codex-tern.sessions.lock", title = "Open in another client"}})
-    elseif item.waiting then
-      table.insert(title.c, {k = "icon", p = {key = "status", name = "bell", role = "codex-tern.sessions.waiting", title = "Needs your input"}})
-    elseif item.running then
-      table.insert(title.c, {k = "spinner", p = {key = "status", role = "codex-tern.sessions.running", title = "Working"}})
-    elseif item.failed then
-      table.insert(title.c, {k = "icon", p = {key = "status", name = "warn", role = "codex-tern.sessions.failed", title = "Task failed · Open to review"}})
-    elseif item.completed then
-      table.insert(title.c, {k = "icon", p = {key = "status", name = "check", role = "codex-tern.sessions.completed", title = "Task complete · Unread"}})
+      table.insert(title.c, {k = "icon", p = {key = "status", name = "lock", role = "codex-tern.sessions.lock", title = t("Open in another client")}})
     end
+    local lamps = {}
+    for _, color in {"red", "yellow", "green"} do
+      table.insert(lamps, {k = "el", p = {key = color, tag = "span", class = "ct-lamp ct-lamp-" .. color,
+        attrs = {["aria-hidden"] = "true"}}, c = {
+          {k = "el", p = {key = "lit", tag = "span", class = "ct-lamp-lit"}},
+        }})
+    end
+    table.insert(title.c, 1, {k = "el", p = {key = "traffic", tag = "span", role = "codex-tern.sessions.traffic",
+      class = "ct-session-traffic ct-session-" .. (status or "off"), title = status_text, aria = status_text,
+      attrs = {["role"] = "img"}}, c = lamps})
+    local can_archive = snapshot.archiveProtocol == 1 and item.canArchive and not locked
+    if snapshot.pinProtocol == 1 then
+      table.insert(title.c, {k = "el", p = {key = "pin", tag = "button", role = "codex-tern.sessions.pin",
+        aria = if item.pinned then t("Unpin session") else t("Pin session"),
+        title = if item.pinned then t("Unpin session") else t("Pin session"),
+        mark = if item.pinned then "pinned" else nil, attrs = {["aria-pressed"] = if item.pinned then "true" else "false"},
+        actions = {click = "pin=" .. item.id}}, c = {
+          {k = "text", p = {key = "icon", text = if item.pinned then "★" else "☆"}},
+        }})
+    end
+    table.insert(title.c, {k = "el", p = {key = "archive", tag = "button", role = "codex-tern.sessions.archive",
+      aria = t("Archive session"), title = if can_archive then t("Archive session") else t("Session cannot be archived yet"),
+      mark = if can_archive then nil else "disabled", attrs = {["aria-disabled"] = if can_archive then "false" else "true"},
+      actions = {click = "archive=" .. item.id}}, c = {
+        {k = "icon", p = {key = "icon", name = "x"}},
+      }})
+    local body = {title}
     table.insert(rows, {k = "col", p = {key = item.id, role = "codex-tern.sessions.item",
+      aria = item.title .. (if status_text then " · " .. status_text else ""),
       mark = if item.id == current then "pick" elseif locked then "locked"
         elseif selection and item.id == selection.id then "pending" else nil,
       title = item.title, actions = {click = if locked then nil else "resume=" .. item.id,
-        menu = {"Rename session", "Delete session"}}}, c = {
-        title,
-      }})
+        menu = {t("Rename session"), t("Delete session")}}}, c = body})
   end
   local note = snapshot.error
   if note == nil or note == "" then
-    if snapshot.connecting then note = "Connecting…"
-    elseif not snapshot.connected then note = "Codex disconnected."
-    elseif selection and selection.id ~= current then note = "Opening session…"
-    elseif snapshot.loading and #snapshot.rows == 0 then note = "Loading…"
-    elseif #snapshot.rows == 0 then note = "No sessions in this folder."
+    if snapshot.connecting then note = t("Connecting…")
+    elseif not snapshot.connected then note = t("Codex disconnected.")
+    elseif selection and selection.id ~= current then note = t("Opening session…")
+    elseif snapshot.loading and #snapshot.rows == 0 then note = t("Loading…")
+    elseif #snapshot.rows == 0 then note = t("No sessions in this folder.")
     elseif not snapshot.canSwitch then note = snapshot.blockedReason end
   end
   -- Keep the keyed structure stable while a switch is in flight.
   table.insert(rows, {k = "text", p = {key = "note", role = "codex-tern.sessions.note",
     hidden = not note or note == "", tone = "muted", text = note or ""}})
   if snapshot.more then
-    table.insert(rows, {k = "text", p = {key = "more", role = "codex-tern.sessions.note", text = "Load more", actions = {click = "more"}}})
+    table.insert(rows, {k = "text", p = {key = "more", role = "codex-tern.sessions.note", text = t("Load more"), actions = {click = "more"}}})
   end
   return {k = "col", p = {key = "sessions", role = "codex-tern.sessions"}, c = rows}
 end
@@ -149,7 +177,7 @@ local function update(cx, pane, entry)
   local state = bridge(cx, entry.target)
   if not state then
     if entry.raw ~= "closed" then
-      cx.canvas:set(pane, {view = {k = "text", p = {role = "codex-tern.sessions.note", text = "The Codex client is closed."}}})
+      cx.canvas:set(pane, {view = {k = "text", p = {role = "codex-tern.sessions.note", text = t("The Codex client is closed.")}}})
       entry.raw = "closed"
       -- The closed placeholder replaced the list, even if recovery later loads
       -- an identical snapshot. The next live frame must rebuild that list.
@@ -246,9 +274,9 @@ local function open(cx, automatic_target)
     end
   end
   if not automatic_target then cx.layout:focus(target) end
-  local pane, err = cx.canvas:open({title = "Sessions", view = view(state.snapshot),
+  local pane, err = cx.canvas:open({title = t("Sessions"), view = view(state.snapshot),
     about = PREFIX .. tostring(target), how = "beside", focus = false})
-  if not pane then cx:toast("error", "Could not open Codex sessions", err); return end
+  if not pane then cx:toast("error", t("Could not open Codex sessions"), err); return end
   cx.layout:move(pane, target, "left", {focus = false})
   panels[pane] = {target = target, raw = state.raw, view = view(state.snapshot), refreshed = tern.now(), locks_refreshed = tern.now()}
   widths.initialize(cx, pane, panels[pane], state.snapshot)
@@ -332,6 +360,7 @@ tern.on("canvas_action", function(ev, cx)
   if outline.action(ev, cx, bridge, send) then poll(true); return true end
   local entry = panels[ev.pane]
   if not entry then return true end
+  bridge(cx, entry.target)
   if ev.act == "resume" and ev.value then
     local state = bridge(cx, entry.target)
     if state then
@@ -353,6 +382,13 @@ tern.on("canvas_action", function(ev, cx)
         poll(true)
       end
     end
+  elseif ev.act == "pin" and ev.value then
+    local state = bridge(cx, entry.target)
+    if state and state.snapshot.pinProtocol == 1 then
+      for _, row in state.snapshot.rows do
+        if row.id == ev.value then send(cx, entry.target, "pin", row.id); poll(true); break end
+      end
+    end
   elseif ev.act == "new" then
     local state = bridge(cx, entry.target)
     if state and state.snapshot.canSwitch then
@@ -366,7 +402,7 @@ tern.on("canvas_action", function(ev, cx)
       cx.layout:focus(entry.target)
       poll(true)
     end
-  elseif ev.act == "Rename session" then
+  elseif (ev.act == "Rename session" or ev.act == t("Rename session")) then
     local state = bridge(cx, entry.target)
     if state then
       for _, row in state.snapshot.rows do
@@ -374,7 +410,7 @@ tern.on("canvas_action", function(ev, cx)
           if state.snapshot.renameProtocol ~= 1 then
             cx:toast("info", "Exit the Codex client with Ctrl+Q, then run codex-tern again to enable renaming sessions.")
           elseif not state.snapshot.canSwitch then
-            cx:toast("info", "Wait for the Codex session to finish connecting.")
+            cx:toast("info", t("Wait for the Codex session to finish connecting."))
           else
             send(cx, entry.target, "rename", row.id)
             cx.layout:focus(entry.target)
@@ -384,19 +420,19 @@ tern.on("canvas_action", function(ev, cx)
         end
       end
     end
-  elseif ev.act == "Delete session" or (ev.act == "archive" and ev.value) then
+  elseif (ev.act == "Delete session" or ev.act == t("Delete session")) or (ev.act == "archive" and ev.value) then
     local state = bridge(cx, entry.target)
     if state then
       for _, row in state.snapshot.rows do
         -- Menu labels stay readable; the keyed node identifies the clicked row.
-        if (ev.act == "Delete session" and ev.node == "main.sessions." .. row.id)
+        if ((ev.act == "Delete session" or ev.act == t("Delete session")) and ev.node == "main.sessions." .. row.id)
           or (ev.act == "archive" and ev.value == row.id) then
           if state.snapshot.archiveProtocol ~= 1 then
             cx:toast("info", "Exit the Codex client with Ctrl+Q, then run codex-tern again to enable deleting sessions.")
           elseif row.locked then
-            cx:toast("info", "This session is open in another client.")
+            cx:toast("info", t("This session is open in another client."))
           elseif not row.canArchive then
-            cx:toast("info", "Finish this session's task, answers, queue and draft before deleting.")
+            cx:toast("info", t("Finish this session's task, answers, queue and draft before deleting."))
           else
             send(cx, entry.target, "archive", row.id)
             cx.layout:focus(entry.target)
@@ -409,7 +445,7 @@ tern.on("canvas_action", function(ev, cx)
   elseif ev.act == "archive-disabled" then
     local state = bridge(cx, entry.target)
     cx:toast("info", if state and state.snapshot.archiveProtocol == 1
-      then "Finish this session's task, answers, queue and draft before deleting."
+      then t("Finish this session's task, answers, queue and draft before deleting.")
       else "Exit the Codex client with Ctrl+Q, then run codex-tern again to enable deleting sessions.")
   elseif ev.act == "more" then send(cx, entry.target, "more"); poll(true) end
   -- Always consume owned clicks, including stale ones. Never fall through to Carly.

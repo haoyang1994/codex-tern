@@ -328,7 +328,7 @@ test('completion is delivered once after the final queued turn; stopped turns an
   assert.equal(events.length, 0); assert.equal(c.activeTurn, 'turn');
   finish(rpc, 'new', 'turn'); finish(rpc, 'new', 'turn');
   assert.equal(events.length, 1); assert.equal(events[0].status, 'completed');
-  assert.equal(c.sessionStatus('new').completed, true); c.markRead('new'); assert.equal(c.sessionStatus('new').completed, false);
+  assert.equal(c.sessionStatus('new').completed, true); c.markRead('new', events[0]); assert.equal(c.sessionStatus('new').completed, false);
   c.activeTurn = 'stopped'; finish(rpc, 'new', 'stopped', 'interrupted'); assert.equal(events.length, 1);
   c.activeTurn = 'failed'; finish(rpc, 'new', 'failed', 'failed'); assert.equal(events[1].status, 'failed');
 });

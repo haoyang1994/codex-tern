@@ -305,7 +305,19 @@ test('approvals stay pending until an explicit response, and stale buttons fail'
   assert.equal(t.responses.length, 0);
   c.answer('approval-7', { decision: 'decline' });
   assert.deepEqual(t.responses, [{ id: 'approval-7', result: { decision: 'decline' } }]);
+  t.emit('request', { id: 'approval-7', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', command: 'test' } });
+  assert.equal(c.requests.length, 0, 'duplicate delivery cannot resurrect a consumed request');
   assert.throws(() => c.answer('approval-7', { decision: 'accept' }), /no longer active/);
+});
+test('a native request revision and a new turn invalidate old UI callbacks', () => {
+  const { c, t } = setup();
+  c.activeTurn = 'a';
+  const request = { id: 8, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: 'a', command: 'echo old' } };
+  t.emit('request', request); const old = c.requests[0]!;
+  t.emit('request', { ...request, params: { ...request.params, command: 'echo changed' } });
+  assert.throws(() => c.answer(8, { decision: 'accept' }, old), /no longer active/);
+  t.emit('notification', { method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'b', status: 'inProgress', items: [] } } });
+  assert.equal(c.requests.length, 0); t.emit('request', request); assert.equal(c.requests.length, 0);
 });
 test('resolved requests and turn completion invalidate old approvals', () => {
   const { c, t } = setup();

@@ -76,11 +76,13 @@ Clients started before window reload was added need one restart to gain the feat
 
 On macOS, local recovery files live in `~/Library/Application Support/codex-tern/recovery/`. `XDG_STATE_HOME` overrides the state root. Files are private to your user and scoped by project, Tern profile and Codex home. They contain draft text and attachment paths; keep the original images or their pasted-image cache available. Plain text mode keeps its existing in-memory behavior.
 
-## Appearance
+## Language and appearance
 
-Chat messages use Concourse T3 for Latin text and LXGW Neo XiHei (霞鹜新晰黑) for Chinese, at 17 px with a 29 px line height, 16 px between paragraphs, and a centered 736 px reading column. The input area and sidebar use the same font pair at smaller sizes. Install both font families locally for this appearance; other systems fall back to their available Chinese and UI fonts. Code keeps Tern's configured code font. The sidebar has single-line titles in 32 px rows separated by 2 px; update times appear on hover. After rebuilding, use **Reload Window** to load the client styles. With the plugin installed, `tern plugin reload` also applies the shared styles to existing clients, including older clients.
+Choose **More actions → Interface language** to switch between **English** and **简体中文**. The choice is saved under `codex-tern/preferences.json` in the application state directory and applies to new client launches in every workspace. Changing the language updates the current client and its sidebar immediately. Other open clients pick it up on restart. User messages, assistant replies, code, file paths and model names keep their original text.
 
-Choose **Islands** in Tern’s **Change interface style** for rounded cards and spacing.
+The client and sidebar use Tern's configured font family, font size and line metrics. Change them in Tern settings; no separate client font setting is required. The caret uses the same line metric as the input text.
+
+Each session row has a small **×** button to archive it. Running tasks, pending questions, queues, unsent drafts and sessions locked by another client remain protected. Archiving the selected session opens an available ordinary neighbour, skipping the reserved Weixin Chief; when none remains, it creates a blank conversation.
 
 ## Files and writing
 
@@ -95,3 +97,13 @@ Images can be pasted; the actions menu retains **Attach image** for entering a p
 ## Approvals
 
 **Approve for me** is enabled by default. The official Codex backend reviews eligible approval requests automatically. Requests that still need your decision appear in Tern. Explicit `-c` settings take precedence; use `codex-tern -c 'approvals_reviewer="user"'` for manual approval. Session details show the active reviewer.
+
+## Commands, skills and pinned sessions
+
+Type `/` in the message composer to see commands. `/help` lists them. `/exit` and `/quit` close the client through its normal draft-saving flow; `/new`, `/resume [ID]`, `/model [ID]`, `/status`, `/stop` and `/language [en|zh-CN]` use the existing navigation and panels. Help and exit work while disconnected. Unknown commands remain in the composer with an error. Commands require a single line without attachments; paths, multiline messages and question answers keep their normal meaning. Plain mode shares the registry and retains its queue, recovery and reply commands.
+
+Use `/skills [search]` or type `$` to find enabled skills for the current workspace. The picker shows backend paths to distinguish identical names. Selecting a skill inserts `$name` and binds its exact path; sending includes both the original text and the structured skill input. Drafts, queued messages and uncertain-send recovery preserve that binding along with attachments. A fresh lookup detects new skills; unavailable or ambiguous selected skills leave the message intact for correction. **Refresh skills** scans again. Scan errors appear in the picker. Queued/retried messages use their saved skill inputs.
+
+Click **☆** beside a session to pin it; **★** marks a pinned session and removes the pin when clicked. Pinned sessions appear first, with the existing activity order preserved inside both groups. Pins persist as local preferences alongside language and default model. A session open in another client can be pinned without taking its writer lock. The adjacent **×** still archives the session; archived entries remain hidden even if previously pinned.
+
+This update changes the retained controller and draft format. Existing clients need one restart after their current tasks finish; window reload alone cannot enable it. Run `tern plugin reload` to load updated sidebar controls. Building does not restart or interrupt an existing client.

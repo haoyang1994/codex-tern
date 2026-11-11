@@ -15,7 +15,7 @@ test('activity grouping preserves answers, steering messages and turn boundaries
     item('legacy', 'agentMessage', { phase: null }), item('other', 'commandExecution', {}, 'next'),
   ]);
   assert.deepEqual(parts.map(p => p.kind === 'message' ? p.entry.id : p.entries.map(e => e.id)),
-    ['u', ['c', 's'], 'steer', ['s2'], 'f', 'legacy', ['other']]);
+    ['u', 'c', ['s'], 'steer', ['s2'], 'f', 'legacy', ['other']]);
 });
 
 test('empty finished reasoning disappears and command previews stay bounded', () => {

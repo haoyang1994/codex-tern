@@ -1,4 +1,6 @@
+import { NATIVE_ABI_VERSION } from './native-abi';
 /** @jsxImportSource @stencil-hq/tern */
+import { translate, isLanguage } from './i18n';
 import { css, html, Node, type Session, type Surface, type PickerItem, type Key } from '@stencil-hq/tern';
 import { basename, dirname, join, resolve } from 'node:path';
 import { readdir, stat } from 'node:fs/promises';
@@ -9,12 +11,16 @@ import { readSystemClipboard } from './clipboard/system';
 import { markdownFileLinks } from './clipboard/files';
 import { EnhancedPasteController } from './clipboard/enhanced-paste';
 import { ClipboardInput } from './clipboard/input';
+import { copyNativeSelection, selectionCopyMenus } from './clipboard/copy';
 import { Controller, type DisplayItem, type PendingRequest, type Completion } from './controller';
 import { completionNotification } from './notifications';
 import { FolderSessions } from './folder-sessions';
 import { sessionInUse } from './session-locks';
+import { installChiefGuard, reservedMessage, type ChiefGuard } from './weixin-chief-guard';
 import { Draft } from './draft';
 import { Composer } from './composer';
+import { parseCommand, commandHelp } from './commands';
+import { skillNames } from './skills';
 import { isRpcOutcomeUnknown } from './rpc';
 import type { ReasoningEffort } from './generated/ReasoningEffort';
 import type { UserInput } from './generated/v2/UserInput';
@@ -45,18 +51,21 @@ const styles = css`
   .ct-activity-toggle:hover { color: var(--t1); }
   .ct-activity-preview { margin: 2px 0 5px 20px; padding-left: 10px; border-left: 1px solid var(--l2); }
   .ct-activity-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ct-activity-output { font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; max-height: 4.5em; overflow: hidden; }
+  .ct-activity-output { font: var(--sf-fs)/var(--sf-grid-lh) var(--tv-font, var(--mono)); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; max-height: 4.5em; overflow: hidden; }
+  [data-role="ct.turn.result"] { width: 100%; max-width: 736px; margin-left: auto; margin-right: auto; }
   [data-role="omp.user.images"] { min-width: 0; align-items: flex-start; }
   [data-role="omp.user.images"] .sf-image { max-width: 100%; border-radius: 8px; overflow: hidden; }
   [data-role="omp.user.images"] .sf-image img { display: block; max-width: 100%; height: auto; object-fit: contain; }
 `;
 
 // Increment when the retained runtime or reload state needs an incompatible change.
-export const UI_API_VERSION = 4;
+export const UI_API_VERSION = NATIVE_ABI_VERSION;
 export type NativeUIState = ReturnType<NativeUI['reloadState']>;
 
 export class NativeUI {
   private readonly clientInstance = randomUUID();
+  private chiefGuard?: ChiefGuard;
+  private reservedChief: string | null = null;
   private sidebarRequested = false;
   private composer = new Composer();
   get draft() { return this.composer.draft; }
@@ -69,7 +78,8 @@ export class NativeUI {
   private pasting = 0;
   private failedPreviews = new Set<string>();
   private deferredKeys: Key[] = [];
-  panel: 'history' | 'models' | 'default-model' | 'folders' | 'effort' | 'send-mode' | 'workspace' | 'attach' | 'rename' | 'details' | 'help' | 'diff' | 'menu' | null = null;
+  panel: 'history' | 'models' | 'default-model' | 'folders' | 'effort' | 'send-mode' | 'workspace' | 'attach' | 'rename' | 'details' | 'help' | 'diff' | 'menu' | 'language' | 'skills' | null = null;
+  private resolvingSkills = false;
   private pickerReturn?: { panel: 'workspace' | 'details'; draft: Draft };
   private preferenceSaving = false;
   private preferenceError = '';
@@ -116,6 +126,13 @@ export class NativeUI {
   private completion?: Completion;
   private completionTimer?: ReturnType<typeof setTimeout>;
   private visible = true;
+  private resultReadTimer?: ReturnType<typeof setTimeout>;
+  private resultInspecting = false;
+  private renderedResult?: Completion;
+  private resultInteraction?: Completion;
+  private resultView?: { result: Completion; position: ReadingView; render: number };
+  private resultRender = 0;
+  private inspectResult = () => inspectReadingFocus(`ct.transcript.${this.clientInstance}`, this.clientInstance);
   generation = 0;
   reloadWindow?: () => Promise<void>;
   notify: (event: Completion) => void = event => {
@@ -135,6 +152,10 @@ export class NativeUI {
     }
     c.on('change', this.onChange);
     c.on('completion', this.onCompletion);
+    this.chiefGuard = installChiefGuard(c.rpc);
+    this.chiefGuard?.rememberRequests(c.controlledConversations().flatMap(conversation => conversation.requests));
+    void this.chiefGuard?.id().then(id => { this.reservedChief = id; if (!this.ended) this.schedule(); })
+      .catch(error => c.notice(error.message, true));
   }
 
   applyStyles() {
@@ -220,7 +241,7 @@ export class NativeUI {
 
   assertReloadable() {
     if (this.ended) throw new Error('This window is closed.');
-    if (this.pasting || this.pendingActions || this.c.operation || this.c.selecting || this.navigating || this.tocJumping
+    if (this.pasting || this.resolvingSkills || this.pendingActions || this.c.operation || this.c.selecting || this.navigating || this.tocJumping
       || this.renaming?.saving || this.historyLoading || this.sidebarRequested)
       throw new Error('Wait for the current input or session action to finish, then reload the window.');
   }
@@ -249,7 +270,49 @@ export class NativeUI {
   focus() { this.surface.focus(this.focused || null); }
   setVisible(visible: boolean) {
     this.visible = visible;
-    if (visible && this.c.thread) this.c.markRead(this.c.thread.id);
+    if (!visible) { this.resultInteraction = undefined; this.resultView = undefined; }
+    if (visible) this.scheduleResultRead();
+  }
+
+  /** Only real keys/pointer actions call this; bridge polling and refresh never do. */
+  noteInteraction() {
+    const id = this.c.thread?.id, result = id && this.c.unreadResult(id);
+    if (!this.visible || this.panel || !result || result !== this.renderedResult) return;
+    this.resultInteraction = result; this.scheduleResultRead();
+  }
+
+  private scheduleResultRead() {
+    if (this.ended || this.surface.closed || !this.visible || this.resultReadTimer || this.resultInspecting
+      || !this.c.thread || !this.c.unreadResult(this.c.thread.id)) return;
+    this.resultReadTimer = setTimeout(() => {
+      this.resultReadTimer = undefined; void this.readVisibleResult();
+    }, 350);
+  }
+
+  private async readVisibleResult() {
+    const id = this.c.thread?.id, result = id && this.c.unreadResult(id), render = this.resultRender;
+    if (!id || !result || result !== this.renderedResult || this.ended || !this.visible || this.panel
+      || this.navigating || this.c.selecting || this.tocJumping || this.surface.blocked) {
+      this.resultView = undefined; this.scheduleResultRead(); return;
+    }
+    this.resultInspecting = true;
+    try {
+      const focus = await this.inspectResult();
+      if (!focus || this.ended || !this.visible || this.panel || this.navigating || this.c.selecting
+        || this.tocJumping || this.c.thread?.id !== id || this.c.unreadResult(id) !== result
+        || render !== this.resultRender) return;
+      // TSP has no scroll event. Compare two settled layouts of this exact result,
+      // relative to the viewport; transcript renders and restores reset the baseline.
+      const previous = this.resultView;
+      if (focus.position && previous?.result === result && previous.render === render
+        && !sameReadingView(previous.position, focus.position)) this.resultInteraction = result;
+      this.resultView = focus.position && { result, position: focus.position, render };
+      if (this.resultInteraction === result && focus.fullyVisible.includes(`main.result:${result.turnId}`))
+        this.c.markRead(id, result);
+    } finally {
+      // An interaction that did not expose the result is not a standing read permit.
+      this.resultInteraction = undefined; this.resultInspecting = false; this.scheduleResultRead();
+    }
   }
 
   private onChange = () => {
@@ -268,11 +331,11 @@ export class NativeUI {
       this.completionTimer = setTimeout(() => { this.completion = undefined; this.schedule(); }, 8000);
       this.notify(event);
     }
-    if (event.threadId === this.c.thread?.id && this.visible) this.c.markRead(event.threadId);
     this.schedule();
   };
   private saveComposer(id: string, composer: Composer, savedDraft: Draft | null = null) {
-    this.c.saveDraft(id, { text: (savedDraft ?? composer.draft).submittedText, images: [...composer.images] });
+    const draft = savedDraft ?? composer.draft;
+    this.c.saveDraft(id, { text: draft.submittedText, images: [...composer.images], skills: draft.selectedSkills });
   }
   private syncComposer() {
     const id = this.c.thread?.id;
@@ -291,9 +354,9 @@ export class NativeUI {
         this.composer = new Composer(); this.answerTarget = null; this.savedDraft = null;
         this.draft.set([recovered?.text, earlyText].filter(Boolean).join('\n\n'));
         this.images = [...(recovered?.images ?? []), ...earlyImages];
+        this.draft.selectedSkills = structuredClone(recovered?.skills ?? []);
       }
       this.composerThread = id;
-      if (this.visible) this.c.markRead(id);
     }
     this.saveComposer(id, this.composer, this.savedDraft);
     for (const [other, saved] of this.sessionDrafts) if (other !== id)
@@ -308,9 +371,10 @@ export class NativeUI {
     this.pendingActions++;
     void this.c.act(fn).finally(() => { this.pendingActions--; });
   }
+  private t(text: string) { return translate(this.c.preferences.language, text); }
   private button(label: string, action: () => void, extra = '', disabled = false) {
-    return <html.button key={label} class={`ct-button ${extra}`} aria={label} attrs={{ 'aria-disabled': disabled }}
-      onClick={disabled ? undefined : () => { action(); this.render(); }}>{label}</html.button>;
+    return <html.button key={label} class={`ct-button ${extra}`} aria={this.t(label)} attrs={{ 'aria-disabled': disabled }}
+      onClick={disabled ? undefined : () => { action(); this.render(); }}>{this.t(label)}</html.button>;
   }
   private focusComposer() { this.focused = 'dock.body.line.input'; this.surface.focus(this.focused); }
   async openSidebar() {
@@ -333,10 +397,15 @@ export class NativeUI {
     if (this.panel || this.pasting) throw new Error('Finish the paste or close the open dialog before deleting.');
     if (this.folderSessions.isLocked(id)) throw new Error('This session is open in another client.');
     if (this.hasSessionDraft(id)) throw new Error('Send or clear this session\'s draft before deleting it.');
+    const reserved = await this.chiefGuard?.id();
+    if (id === reserved) throw new Error(reservedMessage);
     const rows = this.folderSessions.snapshot.rows;
     const at = rows.findIndex(row => row.id === id);
-    const replacement = [...rows.slice(at + 1), ...rows.slice(0, at).reverse()].find(row => !row.locked)?.id;
-    if (await this.navigate(() => this.c.archiveThread(id, replacement))) {
+    const replacement = [...rows.slice(at + 1), ...rows.slice(0, at).reverse()]
+      .find(row => !row.locked && row.id !== reserved)?.id;
+    // An empty ID explicitly creates a blank session. Unlike undefined, it does
+    // not let retained ABI8 controllers fall back to a cached reserved Chief.
+    if (await this.navigate(() => this.c.archiveThread(id, replacement ?? ''))) {
       this.sessionDrafts.delete(id); this.readingPositions.saved.delete(id); this.tocSelections.delete(id);
     }
   }
@@ -387,7 +456,7 @@ export class NativeUI {
     }
   }
 
-  async openSession(id: string): Promise<boolean> {
+  async openSession(id: string, interacted = true): Promise<boolean> {
     if (this.folderSessions.isLocked(id)) return false;
     const thread = this.c.threads.find(t => t.id === id);
     if (thread && this.openProject && await projectRoot(thread.cwd) !== await projectRoot(this.projectDirectory))
@@ -395,7 +464,13 @@ export class NativeUI {
     if (this.pasting || this.panel) {
       this.folderSessions.fail('Finish the paste or close the open dialog before switching.'); return false;
     }
-    return this.navigate(() => this.c.resume(id), id);
+    const result = this.c.unreadResult(id);
+    const opened = await this.navigate(() => this.c.resume(id), id);
+    // Selecting a completed session counts, but a result arriving during navigation does not.
+    if (opened && interacted && result && this.c.unreadResult(id) === result) {
+      this.resultInteraction = result; this.scheduleResultRead();
+    }
+    return opened;
   }
 
   async newSession(cwd = this.c.cwd): Promise<boolean> {
@@ -466,6 +541,10 @@ export class NativeUI {
       this.historyLoading = true;
       this.action(async () => { try { await this.c.listThreads(this.allThreads); } finally { this.historyLoading = false; this.render(); } });
     }
+    if (panel === 'skills') {
+      this.dialogDraft.set(text);
+      this.action(async () => { await this.c.skills.list(); });
+    }
     if (panel === 'workspace') { this.dialogDraft.set(this.c.cwd); this.workspaceError = ''; }
     else if (panel === 'rename') this.dialogDraft.set(text);
     if (panel === 'default-model') this.preferenceError = '';
@@ -505,7 +584,7 @@ export class NativeUI {
         .filter((name): name is string => name !== null).sort((a, b) => a.localeCompare(b));
       if (read !== this.folderRead || this.panel !== 'folders') return;
       this.folderBrowser.items = [
-        ...(dirname(directory) !== directory ? [{ id: dirname(directory), label: 'Parent folder', detail: dirname(directory), icon: 'arrow-up' }] : []),
+        ...(dirname(directory) !== directory ? [{ id: dirname(directory), label: this.t("Parent folder"), detail: dirname(directory), icon: 'arrow-up' }] : []),
         ...directories.map(name => ({ id: join(directory, name), label: name, icon: 'folder' })),
       ];
     } catch (error) {
@@ -548,7 +627,7 @@ export class NativeUI {
           text={assistantMarkdown(part.text, this.c.cwd)} stream={!entry.done}
           actions={{ menu: ['copy'] }} />;
         const id = ids[number++]!;
-        return <ProposalView key={`proposal-${part.start}`} before={part.before} after={part.after}
+        return <ProposalView language={this.c.preferences.language} key={`proposal-${part.start}`} before={part.before} after={part.after}
           number={number} checked={selection.has(id)} disabled={disabled} onSelect={checked => {
             if (!available()) return;
             if (checked) selection.add(id); else selection.delete(id);
@@ -556,8 +635,8 @@ export class NativeUI {
           }} />;
       })}
       {!!proposals.length && <html.div key="proposal-actions" class="ct-proposal-actions">
-        <html.button class="ct-button ct-proposal-apply" aria="Apply selected edits" attrs={{ 'aria-disabled': disabled || !selected().length }}
-          title="Add a request to the message box" onClick={() => {
+        <html.button class="ct-button ct-proposal-apply" aria={this.t("Apply selected edits")} attrs={{ 'aria-disabled': disabled || !selected().length }}
+          title={this.t("Add a request to the message box")} onClick={() => {
             const numbers = selected();
             if (!available() || !numbers.length) return;
             let prompt = `Apply the edits ${numbers.join(', ')}.`;
@@ -574,15 +653,15 @@ export class NativeUI {
             if (next !== this.draft.text) this.draft.set(next);
             this.proposalDrafts.set(this.draft, { text: next, prefix });
             this.render(); this.focusComposer();
-          }}>Apply selected edits</html.button>
-        <html.span class="ct-proposal-count" text={`${selected().length} selected`} />
+          }}>{this.t("Apply selected edits")}</html.button>
+        <html.span class="ct-proposal-count" text={this.t(`${selected().length} selected`)} />
       </html.div>}
       {forkable && <row key="actions" role="ct.reply.actions" gap="sm" align="center">
-        <html.button key="fork" class="ct-reply-action" role="ct.reply.fork" aria="Fork from here"
-          title="Start a new session with the conversation up to this reply"
+        <html.button key="fork" class="ct-reply-action" role="ct.reply.fork" aria={this.t("Fork from here")}
+          title={this.t("Start a new session with the conversation up to this reply")}
           attrs={{ 'aria-disabled': !forkEnabled() }} onClick={() => {
             if (forkEnabled()) void this.forkSession(threadId!, entry.turnId);
-          }}><icon name="branch" /><text text="Fork from here" /></html.button>
+          }}><icon name="branch" /><text text={this.t("Fork from here")} /></html.button>
       </row>}
     </col>;
   }
@@ -602,41 +681,41 @@ export class NativeUI {
           {!!images.length && <row key="images" role="omp.user.images" gap="sm" wrap>
             {images.map((p, n) => p.type === 'localImage' ? this.imageNode(p.path)
               : 'url' in p && p.url.startsWith('data:') ? this.imageNode(p.url)
-              : <text key={`unavailable-${n}`} tone="muted" text="Image unavailable" />)}
+              : <text key={`unavailable-${n}`} tone="muted" text={this.t("Image unavailable")} />)}
           </row>}
           {!!text && <md key="text" text={text} actions={{ menu: ['copy'] }} />}
           {entry.delivery && <text key="delivery" role="ct.user.delivery" tone="muted"
-            text={entry.delivery === 'sending' ? 'Sending…' : 'Waiting for Codex…'} />}
+            text={entry.delivery === 'sending' ? this.t("Sending…") : this.t("Waiting for Codex…")} />}
         </col>
       </card>;
     }
     if (i.type === 'agentMessage') return this.renderAssistant(entry, i.text);
     if (i.type === 'reasoning' && entry.done && !(i.summary ?? []).join('').trim()) return null;
-    if (i.type === 'reasoning') return <section key={entry.id} role={entry.done ? 'omp.thinking' : 'omp.thinking.live'} head={entry.done ? 'Thought summary' : 'Thinking…'} collapsible collapsed>
-      <md key="text" text={(i.summary ?? []).join('\n\n') || 'Thinking…'} stream={!entry.done} />
+    if (i.type === 'reasoning') return <section key={entry.id} role={entry.done ? 'omp.thinking' : 'omp.thinking.live'} head={entry.done ? this.t("Thought summary") : this.t("Thinking…")}>
+      <md key="text" text={(i.summary ?? []).join('\n\n') || this.t("Thinking…")} stream={!entry.done} />
     </section>;
-    if (i.type === 'commandExecution') return <tool key={entry.id} name="shell" title="Run command"
+    if (i.type === 'commandExecution') return <tool key={entry.id} name="shell" title={this.t("Run command")}
       target={i.command} targetKind="command" status={status} collapsible collapsed={entry.done}
       exit={i.exitCode ?? undefined} took={i.durationMs != null ? i.durationMs / 1000 : undefined}
       meta={[i.cwd ?? '']} preview={{ tail: 8 }}>
       <code key="out" text={i.aggregatedOutput ?? ''} lang="text" wrap />
     </tool>;
-    if (i.type === 'fileChange') return <tool key={entry.id} name="edit" title="File changes" status={status} collapsible>
+    if (i.type === 'fileChange') return <tool key={entry.id} name="edit" title={this.t("File changes")} status={status} collapsible>
       {(i.changes ?? []).map((f: any, n: number) => <diff key={`f${n}`} text={f.diff} path={f.path} mode="unified" />)}
     </tool>;
-    if (i.type === 'functionCallOutput') return <tool key={entry.id} name="code" title={i.name ?? 'Tool output'} status="done" collapsible collapsed>
+    if (i.type === 'functionCallOutput') return <tool key={entry.id} name="code" title={i.name ?? this.t("Tool output")} status="done" collapsible collapsed>
       <code key="output" text={typeof i.output === 'string' ? i.output : JSON.stringify(i.output, null, 2)} lang="text" wrap />
     </tool>;
     if (i.type === 'mcpToolCall' || i.type === 'dynamicToolCall') return <tool key={entry.id} name="mcp"
-      title={`${i.type === 'mcpToolCall' ? i.server : i.namespace ?? 'tool'} · ${i.tool}`} status={status} collapsible collapsed={entry.done}>
+      title={this.t(`${i.type === 'mcpToolCall' ? i.server : i.namespace ?? 'tool'} · ${i.tool}`)} status={status} collapsible collapsed={entry.done}>
       <code key="args" text={JSON.stringify(i.arguments, null, 2)} lang="json" wrap />
       <code key="result" text={JSON.stringify(i.type === 'mcpToolCall' ? i.error ?? i.result ?? '' : i.contentItems ?? '', null, 2)} lang="json" wrap />
     </tool>;
     if (i.type === 'collabAgentToolCall') return <agent key={entry.id} name={i.tool}
       task={i.prompt ?? (i.receiverThreadIds ?? []).join(', ')} status={status === 'error' ? 'failed' : status}
       model={i.model ?? undefined} collapsible collapsed={entry.done} />;
-    if (i.type === 'plan') return <card key={entry.id} head="Plan" collapsible><md text={assistantMarkdown(i.text, this.c.cwd)} /></card>;
-    if (i.type === 'contextCompaction') return <text key={entry.id} tone="muted" text="Context compacted" />;
+    if (i.type === 'plan') return <card key={entry.id} role="omp.progress.plan" head={this.t("Plan")}><md text={assistantMarkdown(i.text, this.c.cwd)} /></card>;
+    if (i.type === 'contextCompaction') return <text key={entry.id} tone="muted" text={this.t("Context compacted")} />;
     return <section key={entry.id} head={i.type} collapsible collapsed><code text={JSON.stringify(i, null, 2)} lang="json" wrap /></section>;
   }
 
@@ -658,7 +737,7 @@ export class NativeUI {
     const label = `${state}${duration}${summary ? ` · ${summary}` : ''}${errors ? ' · has errors' : ''}`;
     const preview = compactActivity(part.entries.at(-1)!);
     return <html.div key={`activity-${part.id}`} class="ct-activity">
-      <html.button key="toggle" class="ct-activity-toggle" aria={`${mode === 'expanded' ? 'Hide' : 'Show'} activity details · ${label}`}
+      <html.button key="toggle" class="ct-activity-toggle" aria={this.t(`${mode === 'expanded' ? 'Hide' : 'Show'} activity details · ${label}`)}
         attrs={{ 'aria-expanded': mode === 'expanded' }}
         onClick={() => {
           this.activityModes.set(key, mode === 'expanded' ? 'collapsed' : 'expanded'); this.render();
@@ -669,7 +748,7 @@ export class NativeUI {
             : state === 'Failed' || state === 'Disconnected' || errors ? 'warn' : live ? 'clock' : 'check'} />
         </html.span>
         <html.span key="label" class="ct-activity-label">
-          <text key="state" role="ct.activity.state" text={state} />
+          <text key="state" role="ct.activity.state" text={this.t(state)} />
           <text key="meta" role="ct.activity.meta" text={`${duration}${summary ? ` · ${summary}` : ''}${errors ? ' · has errors' : ''}`.trim()} />
         </html.span>
       </html.button>
@@ -684,14 +763,14 @@ export class NativeUI {
   private renderRequest(r: PendingRequest) {
     const p = r.params;
     const relevant = !p.threadId || p.threadId === this.c.thread?.id;
-    const respond = (result: unknown) => { if (relevant) this.c.answer(r.id, result); };
+    const respond = (result: unknown) => { if (relevant) this.c.answer(r.id, result, r); };
     if (r.method === 'item/tool/requestUserInput') return <html.div key={`req${r.id}`} class="ct-request">
       <col gap="md">
-        <row role="ct.request.heading" gap="sm" align="center"><icon name="message" /><text>Codex needs your input</text></row>
+        <row role="ct.request.heading" gap="sm" align="center"><icon name="message" /><text>{this.t("Codex needs your input")}</text></row>
         {(p.questions ?? []).map((q: any) => <col key={`question-${q.id}`} role="ct.request.question" gap="sm">
           {q.header && <text role="ct.request.eyebrow" text={q.header} />}
           <text role="ct.request.prompt" text={q.question} />
-          {q.isSecret ? <text tone="error" text="Secure input is not supported yet. Stop this turn and use the official client." /> : <>
+          {q.isSecret ? <text tone="error" text={this.t("Secure input is not supported yet. Stop this turn and use the official client.")} /> : <>
             {(q.options ?? []).map((o: any) => <html.button key={`option-${o.label}`}
               class={`ct-choice ${r.answers[q.id]?.[0] === o.label ? 'ct-selected' : ''}`}
               aria={o.label} attrs={{ 'aria-pressed': r.answers[q.id]?.[0] === o.label }}
@@ -706,7 +785,7 @@ export class NativeUI {
               this.answerTarget = { requestId: r.id, questionId: q.id }; this.closePanel();
             }, 'ct-quiet')}
             {r.answers[q.id] && !(q.options ?? []).some((o: any) => r.answers[q.id]?.[0] === o.label) &&
-              <text role="ct.request.answer" text={`Your answer: ${r.answers[q.id].join(', ')}`} />}
+              <text role="ct.request.answer" text={this.t(`Your answer: ${r.answers[q.id].join(', ')}`)} />}
           </>}
         </col>)}
         <html.div class="ct-buttons ct-request-actions">
@@ -716,7 +795,7 @@ export class NativeUI {
       </col>
     </html.div>;
     if (r.method === 'mcpServer/elicitation/request') return <html.div key={`req${r.id}`} class="ct-request"><col gap="sm">
-      <row role="ct.request.heading" gap="sm" align="center"><icon name="globe" /><text text={`${p.serverName} needs an action`} /></row>
+      <row role="ct.request.heading" gap="sm" align="center"><icon name="globe" /><text text={this.t(`${p.serverName} needs an action`)} /></row>
       <text text={p.message} /><text text={p.url} href={p.url} actions={{ click: 'open' }} />
       <html.div class="ct-buttons ct-request-actions">
         {this.button('Cancel', () => respond({ action: 'cancel', content: null, _meta: null }))}
@@ -725,12 +804,12 @@ export class NativeUI {
       </html.div>
     </col></html.div>;
     return <html.div key={`req${r.id}`} class="ct-request"><col gap="sm">
-      <row role="ct.request.heading" gap="sm" align="center"><icon name="shield-alert" /><text>{r.method.includes('fileChange') ? 'Approve file changes' : 'Approve command'}</text></row>
+      <row role="ct.request.heading" gap="sm" align="center"><icon name="shield-alert" /><text>{r.method.includes('fileChange') ? this.t("Approve file changes") : this.t("Approve command")}</text></row>
       {p.reason && <text text={p.reason} />}
       {p.command && <code text={p.command} lang="sh" wrap />}
-      {p.cwd && <text role="ct.request.context" tone="muted" text={`Directory: ${p.cwd}`} />}
-      {p.grantRoot && <text tone="warning" text={`Requested write access: ${p.grantRoot}`} />}
-      <section head="Request details and scope" collapsible collapsed><code text={JSON.stringify(p, null, 2)} lang="json" wrap /></section>
+      {p.cwd && <text role="ct.request.context" tone="muted" text={this.t(`Directory: ${p.cwd}`)} />}
+      {p.grantRoot && <text tone="warning" text={this.t(`Requested write access: ${p.grantRoot}`)} />}
+      <section head={this.t("Request details and scope")} collapsible collapsed><code text={JSON.stringify(p, null, 2)} lang="json" wrap /></section>
       <html.div class="ct-buttons ct-request-actions">
         {this.button('Cancel turn', () => respond({ decision: 'cancel' }))}
         {this.button('Decline', () => respond({ decision: 'decline' }), 'ct-danger')}
@@ -742,7 +821,7 @@ export class NativeUI {
 
   private renderSessionBridge() {
     const c = this.c;
-    return <text key="sessions" hidden title={JSON.stringify({ ...this.folderSessions.snapshot, cols: this.session.caps.cols,
+    return <text key="sessions" hidden title={JSON.stringify({ ...this.folderSessions.snapshot, language: c.preferences.language, cols: this.session.caps.cols,
       sidebarRequest: this.sidebarRequested ? this.clientInstance : undefined,
       readingRequest: this.readingPositions.request,
       tocProtocol: 1, tocFollowProtocol: 1, tocClient: this.clientInstance, tocLines: this.tocLines,
@@ -751,7 +830,7 @@ export class NativeUI {
         location: this.tocLocation?.threadId === c.thread?.id ? this.tocLocation : undefined },
       cellWidth: this.session.caps.cell.w,
       rows: this.folderSessions.snapshot.rows.map(row => ({ ...row, canArchive: row.canArchive && !this.hasSessionDraft(row.id) })),
-      archiveProtocol: 1, renameProtocol: 1, navigationProtocol: 1, newSessionProtocol: 1,
+      archiveProtocol: 1, pinProtocol: 1, renameProtocol: 1, navigationProtocol: 1, newSessionProtocol: 1,
       reloadProtocol: this.reloadWindow ? 1 : undefined, uiGeneration: this.generation, navigation: this.sidebarNavigation })}
       onAction={{ refresh: () => { void this.folderSessions.refresh(); },
         'reading-position': e => this.readingPositions.reply(e.value),
@@ -765,6 +844,10 @@ export class NativeUI {
         hide: () => this.folderSessions.hide(),
         new: () => this.action(() => this.newSession()),
         archive: e => this.action(() => this.archiveSession(e.value)),
+        pin: e => this.action(async () => {
+          const id = e.value;
+          if (id && this.folderSessions.contains(id)) await c.setPinned(id, !c.isPinned(id));
+        }),
         rename: e => this.action(async () => this.openRenameSession(e.value)),
         resume: e => { void this.resumeFromSidebar(e.value); } }} /> as Node;
   }
@@ -792,12 +875,12 @@ export class NativeUI {
       : previous?.id === turn ? previous.startedAt : Date.now();
     this.workingTurns.set(thread, { id: turn, startedAt });
     if (this.c.requests.length) { this.workingRow = undefined; return null; }
-    const key = `${thread}:${turn}`, reduceMotion = this.session.caps.reduceMotion;
+    const key = `${thread}:${turn}:${this.c.preferences.language}`, reduceMotion = this.session.caps.reduceMotion;
     // Keep the native clock's origin stable while typing and streaming. Rebase
     // only when remounting after a session switch, request, or window reload.
     if (this.workingRow?.key === key && this.workingRow.startedAt === startedAt
       && this.workingRow.reduceMotion === reduceMotion) return this.workingRow.node;
-    const node = <WorkingRow turnKey={key} age={Math.max(0, Math.round(Date.now() - startedAt))}
+    const node = <WorkingRow language={this.c.preferences.language} turnKey={key} age={Math.max(0, Math.round(Date.now() - startedAt))}
       reduceMotion={reduceMotion} /> as Node;
     this.workingRow = { key, startedAt, reduceMotion, node };
     return node;
@@ -812,33 +895,38 @@ export class NativeUI {
     this.draft.context = { cols: this.session.caps.cols, dark: this.session.caps.dark,
       reduceMotion: this.session.caps.reduceMotion, supports: kind => this.session.caps.kinds.includes(kind),
       feature: name => this.session.caps.features.includes(name as any) };
-    this.draft.setWorkspace(c.cwd);
-    const ready = c.sessionReady && !!c.thread && !c.operation && !this.pasting && !c.unconfirmed.length;
+    if (!this.answerTarget) this.draft.setWorkspace(c.cwd, c.skills, c.preferences.language);
+    const localCommand = !this.answerTarget && parseCommand(this.draft.submittedText, this.images).kind !== 'text';
+    const ready = (localCommand || (c.sessionReady && !!c.thread && !c.operation && !c.unconfirmed.length)) && !this.pasting && !this.resolvingSkills;
     const pendingQuestion = this.answerTarget && c.requests.find(r => r.id === this.answerTarget!.requestId);
     if (this.answerTarget && !pendingQuestion) this.finishAnswer();
     const hasInput = !!this.draft.submittedText.trim() || (!this.answerTarget && this.images.length > 0);
     const sendEnabled = !this.panel && !this.draft.completing && hasInput;
     const displayModel = c.models.find(m => m.model === c.model)?.displayName ?? c.model;
     const parts = transcriptParts(c.items);
+    const result = c.thread ? c.sessionResult(c.thread.id) : undefined;
     const latestActivity = parts.findLast(p => p.kind === 'activity' && p.turnId === c.activeTurn);
     // Each message stays in its own direct block for native virtualization.
     let main = <col role={`ct.transcript.${this.clientInstance}`}>
         {c.thread?.forkedFromId && <row key="origin" role="ct.fork.origin" gap="sm" align="center" wrap>
-          <icon name="branch" /><text tone="muted" text="Forked conversation" />
-          <html.button class="ct-reply-action" aria="Open source session" attrs={{ 'aria-disabled': c.selecting || !!this.panel }}
+          <icon name="branch" /><text tone="muted" text={this.t("Forked conversation")} />
+          <html.button class="ct-reply-action" aria={this.t("Open source session")} attrs={{ 'aria-disabled': c.selecting || !!this.panel }}
             onClick={() => { const id = c.thread?.forkedFromId; if (id && !c.selecting && !this.panel) this.action(() => this.openSession(id)); }}>
-            Open source</html.button>
+            {this.t("Open source")}</html.button>
         </row>}
-        {!c.items.length && <Welcome />}
-        {c.historyCursor && <text key="earlier" tone="muted" text="Load earlier messages"
+        {!c.items.length && <Welcome language={c.preferences.language} />}
+        {c.historyCursor && <text key="earlier" tone="muted" text={this.t("Load earlier messages")}
           onClick={() => this.action(() => c.loadHistory())} />}
         {parts.map(p => p.kind === 'message' ? this.renderItem(p.entry) : this.renderActivity(p, p === latestActivity))}
         {!!c.activeTurn && !!c.plan.length && <checklist key="plan" phases={[{ title: 'Plan', items: c.plan.map((s, i) => ({
           id: `step${i}`, text: s.step, status: s.status === 'completed' ? 'done' : s.status === 'inProgress' ? 'active' : 'pending',
         })) }]} />}
-        {c.notices.filter(n => n.error).map(n => <card key={`notice${n.id}`} role="omp.error" tone="error" head="Error">
-          <text text={n.text} />{this.button('Dismiss', () => { c.notices = c.notices.filter(x => x.id !== n.id); c.changed(); })}
+        {c.notices.filter(n => n.error).map(n => <card key={`notice${n.id}`} role="omp.error" tone="error" head={this.t("Error")}>
+          <text text={this.t(n.text)} />{this.button('Dismiss', () => { c.notices = c.notices.filter(x => x.id !== n.id); c.changed(); })}
         </card>)}
+        {result && <text key={`result:${result.turnId}`}
+          role="ct.turn.result" tone="muted" onClick={() => this.noteInteraction()}
+          text={this.t(result.status === 'failed' ? 'Task failed' : 'Task complete')} />}
       </col> as Node;
     this.readingPositions.nodes = main.children.map((node, i) => `main.${node.props.key ?? i}`);
     const prompts = new Map(c.items.filter(entry => entry.item.type === 'userMessage').map(entry => [
@@ -847,53 +935,58 @@ export class NativeUI {
       id => !!c.thread && !!c.outlineLocation(c.thread.id, id));
     main = new Node(main.kind, main.props, main.children.map((node, i) =>
       html.div({ key: String(node.props.key ?? i), class: readingAnchorClass(this.readingPositions.nodes[i]!) }, node)));
+    main = selectionCopyMenus(main, () => this.action(() => copyNativeSelection()), c.preferences.language);
     this.surface.render(this.rendered = { main,
       dock: <col>
         {this.renderSessionBridge()}
         {this.completion && <row key="completion" role="ct.completion" gap="sm" align="center">
           <icon key="icon" name={this.completion.status === 'completed' ? 'check' : 'warn'} role="ct.completion.icon" />
-          <text key="label" grow={1} lines={1} text={`${this.completion.status === 'completed' ? 'Task complete' : 'Task failed'}${this.completion.threadId === c.thread?.id ? '' : ` · ${this.completion.title}`}`} />
+          <text key="label" grow={1} lines={1} text={`${this.completion.status === 'completed' ? this.t('Task complete') : this.t('Task failed')}${this.completion.threadId === c.thread?.id ? '' : ` · ${this.completion.title}`}`} />
           {this.completion.threadId !== c.thread?.id && <html.button key="view" class="ct-completion-action" onClick={() => {
             const target = this.completion?.threadId;
             if (target) this.action(async () => { if (await this.openSession(target)) this.completion = undefined; });
-          }}>View</html.button>}
-          <icon key="dismiss" name="x" aria="Dismiss completion" title="Dismiss" onClick={() => { this.completion = undefined; this.render(); }} />
+          }}>{this.t("View")}</html.button>}
+          <icon key="dismiss" name="x" aria={this.t("Dismiss completion")} title={this.t("Dismiss")} onClick={() => { this.completion = undefined; this.render(); }} />
         </row>}
         {(c.connection === 'disconnected' || (c.connection === 'ready' && !c.sessionReady && !c.selecting)) && <row key="reconnect" role="ct.reconnect" gap="sm" align="center">
           <icon name="warn" /><text grow={1} text={c.connection === 'disconnected'
-            ? 'Disconnected · Your draft is kept' : 'Session unavailable · Your draft is kept'} />
+            ? this.t("Disconnected · Your draft is kept") : this.t("Session unavailable · Your draft is kept")} />
           <html.button class="ct-completion-action" onClick={() => this.action(() => c.connection === 'ready' && c.thread
-            ? c.resume(c.thread.id) : c.reconnect())}>{c.connection === 'disconnected' ? 'Reconnect' : 'Retry'}</html.button>
+            ? c.resume(c.thread.id) : c.reconnect())}>{c.connection === 'disconnected' ? this.t("Reconnect") : this.t("Retry")}</html.button>
         </row>}
         {c.requests.map(r => this.renderRequest(r))}
-        {!!c.unconfirmed.length && <section key="unconfirmed" head="Message delivery unconfirmed">
-          <text text="Codex may have received this message. Check the conversation before deciding to retry." />
+        {!!c.unconfirmed.length && <section key="unconfirmed" head={this.t("Message delivery unconfirmed")}>
+          <text text={this.t("Codex may have received this message. Check the conversation before deciding to retry.")} />
           {this.button('Check conversation', () => this.action(() => c.refreshHistory()))}
           {c.unconfirmed.map(q => <col key={q.id} gap="xs">
-            <text text={q.text || '[Image]'} lines={3} />
-            {!!q.images.length && <text tone="muted" text={`${q.images.length} attached image(s)`} />}
+            <text text={q.text || this.t("[Image]")} lines={3} />
+            {!!q.images.length && <text tone="muted" text={this.t(`${q.images.length} attached image(s)`)} />}
             <row gap="sm">
               {this.button('Already received', () => c.resolveUnconfirmed(q.id))}
               {this.button('Queue for retry', () => c.resolveUnconfirmed(q.id, true))}
             </row>
           </col>)}
         </section>}
-        {!!c.queue.length && <section key="queue" role="omp.queue" head={`Queued · ${c.queue.length}${c.queuePaused ? ' · paused' : ''}`} collapsible>
-          {c.queue.map(q => <row key={q.id} role="omp.queue.item" justify="between"><text text={q.text || '[Image]'} lines={2} />
+        {!!c.queue.length && <section key="queue" role="omp.queue" head={this.t(`Queued · ${c.queue.length}${c.queuePaused ? ' · paused' : ''}`)} collapsible>
+          {c.queue.map(q => <row key={q.id} role="omp.queue.item" justify="between"><text text={q.text || this.t("[Image]")} lines={2} />
             {this.button('Remove', () => c.removeQueued(q.id))}</row>)}
           {!c.busy && !c.unconfirmed.length && this.button('Run next', () => this.action(() => c.runQueue()))}
-          <text tone="muted" text="Queued locally. Stops and errors pause the queue." />
+          <text tone="muted" text={this.t("Queued locally. Stops and errors pause the queue.")} />
         </section>}
         {this.renderWorking()}
-        <ComposerFrame running={!!c.activeTurn}>
-          {this.answerTarget && <row key="answering" gap="sm"><text tone="accent" text="Answering a question" />
+        {this.reservedChief && c.thread?.id === this.reservedChief ? <card key="weixin-chief" role="ct.weixin-chief.readonly" head="微信 Chief 独立运行">
+          <text text={c.rpc.ownsThread(this.reservedChief)
+            ? "微信 Chief 仍被当前客户端占用。请正常退出 codex-tern，再恢复原工作会话；后台会自动接续微信。"
+            : "请在微信里继续聊天。桌面不接管微信专用会话。"} />
+        </card> : <ComposerFrame running={!!c.activeTurn}>
+          {this.answerTarget && <row key="answering" gap="sm"><text tone="accent" text={this.t("Answering a question")} />
             {this.button('Back to message', () => this.finishAnswer())}</row>}
           {!!this.images.length && <row key="images" role="omp.composer.chips" gap="sm" wrap>
-            {this.images.map((path, n) => <card key={path} role="omp.composer.chip" tone="accent" head={`Image #${n + 1}`}>
+            {this.images.map((path, n) => <card key={path} role="omp.composer.chip" tone="accent" head={this.t(`Image #${n + 1}`)}>
               {this.imageNode(path, true)}
               <row key="caption" gap="xs" justify="between">
                 <text tone="muted" text={this.previews.get(path)?.width ? `${this.previews.get(path)!.width} × ${this.previews.get(path)!.height}` : basename(path)} />
-                <icon name="x" aria={`Remove image ${n + 1}`} title="Remove image" onClick={() => {
+                <icon name="x" aria={this.t(`Remove image ${n + 1}`)} title={this.t("Remove image")} onClick={() => {
                   this.images = this.images.filter(p => p !== path); this.render();
                 }} />
               </row>
@@ -901,40 +994,40 @@ export class NativeUI {
           </row>}
           <row key="line" role="omp.composer.line" align="start" gap="sm">
             <editor key="input" {...this.draft.nativeProps}
-              maxLines={9} grow={1} placeholder={this.answerTarget ? 'Type your answer…' : c.activeTurn ? 'Steer this turn, or queue a follow-up…' : 'Message Codex…'}
+              maxLines={9} grow={1} placeholder={this.answerTarget ? this.t("Type your answer…") : c.activeTurn ? this.t("Steer this turn, or queue a follow-up…") : this.t("Message Codex…")}
               sendable={ready && !this.panel && !this.answerTarget && !this.draft.completing} onEdit={e => { this.draft.nativeEdit(e); this.render(); }}
               onUndo={() => { this.draft.undo(); this.render(); }} onFocus={() => this.focusComposer()}
               onSend={e => { if (this.draft.text !== e.text) this.draft.set(e.text); void this.send(); }} />
           </row>
-          <row key="bar" role="omp.composer.bar" aria="Codex composer controls" gap="sm" align="center" wrap>
+          <row key="bar" role="omp.composer.bar" aria={this.t("Codex composer controls")} gap="sm" align="center" wrap>
             <row key="settings" role="ct.composer.settings" gap="xs" align="center" grow={1}>
-              <row key="model" role="omp.composer.model" gap="xs" align="center" title="Switch model · Ctrl+Shift+P"
+              <row key="model" role="omp.composer.model" gap="xs" align="center" title={this.t("Switch model · Ctrl+Shift+P")}
                 onClick={() => this.openPanel('models')}>
                 <icon name="model" /><text wrap="none" text={displayModel} title={displayModel} /><icon name="chev" />
               </row>
-              <row key="effort" role="omp.composer.effort" gap="xs" align="center" title="Reasoning effort"
+              <row key="effort" role="omp.composer.effort" gap="xs" align="center" title={this.t("Reasoning effort")}
                 onClick={() => this.openPanel('effort')}>
-                <effort level={c.effort} /><text wrap="none" text={c.effort} />
+                <effort level={c.effort} /><text wrap="none" text={this.t(c.effort)} />
               </row>
             </row>
             <row key="actions" role="ct.composer.actions" gap="xs" align="center">
-              <icon key="new" name="plus" title="New session · Ctrl+Shift+N" aria="New session" onClick={() => this.action(async () => {
+              <icon key="new" name="plus" title={this.t("New session · Ctrl+Shift+N")} aria={this.t("New session")} onClick={() => this.action(async () => {
                 if (this.pasting) throw new Error('Wait for the paste to finish.');
                 await this.newSession();
               })} />
-              <icon key="history" name="history" title="Sessions · Ctrl+L" aria="Sessions" onClick={() => this.openPanel('history')} />
-              <icon key="more" name="more" title="More actions" aria="More actions" onClick={() => this.openPanel('menu')} />
+              <icon key="history" name="history" title={this.t("Sessions · Ctrl+L")} aria={this.t("Sessions")} onClick={() => this.openPanel('history')} />
+              <icon key="more" name="more" title={this.t("More actions")} aria={this.t("More actions")} onClick={() => this.openPanel('menu')} />
               {c.activeTurn && !this.answerTarget && <html.button key="mode" role="ct.composer.mode"
-                aria={`Send mode: ${this.sendMode === 'steer' ? 'Steer' : 'Queue'}`} title="Choose how to send while running"
+                aria={this.t(`Send mode: ${this.sendMode === 'steer' ? 'Steer' : 'Queue'}`)} title={this.t("Choose how to send while running")}
                 attrs={{ 'aria-haspopup': 'dialog', 'aria-expanded': this.panel === 'send-mode' }}
                 onClick={() => this.openPanel('send-mode')}>
-                <text text={this.sendMode === 'steer' ? 'Steer' : 'Queue'} /><icon name="chev" />
+                <text text={this.sendMode === 'steer' ? this.t("Steer") : this.t("Queue")} /><icon name="chev" />
               </html.button>}
-              {c.activeTurn && <html.button key="stop" role="omp.composer.stop" class="ct-stop" aria="Stop current turn" title="Stop · Ctrl+C"
+              {c.activeTurn && <html.button key="stop" role="omp.composer.stop" class="ct-stop" aria={this.t("Stop current turn")} title={this.t("Stop · Ctrl+C")}
                 onClick={() => this.action(() => c.stop())}><html.span class="ct-stop-mark" attrs={{ 'aria-hidden': true }} /></html.button>}
               {ready && (!c.activeTurn || hasInput) && <html.button key="send" role="omp.composer.send" class="ct-send" attrs={{ 'aria-disabled': !sendEnabled }}
-                aria={this.answerTarget ? 'Save answer' : 'Send message'}
-                title={this.answerTarget ? 'Save answer' : c.activeTurn ? this.sendMode === 'steer' ? 'Steer current turn' : 'Queue follow-up' : 'Send · Enter'}
+                aria={this.answerTarget ? this.t("Save answer") : this.t("Send message")}
+                title={this.answerTarget ? this.t("Save answer") : c.activeTurn ? this.sendMode === 'steer' ? this.t("Steer current turn") : this.t("Queue follow-up") : this.t("Send · Enter")}
                 onClick={sendEnabled ? () => { void this.send(); } : undefined}><icon name="arrow-up" /></html.button>}
             </row>
           </row>
@@ -944,15 +1037,15 @@ export class NativeUI {
                 onClick={() => this.openPanel('workspace')}>{basename(c.cwd) || c.cwd}</seg>
               <seg key="connection" role="omp.status.account" priority={1}
                 icon={c.connection === 'ready' ? undefined : c.connection === 'disconnected' ? 'error' : 'clock'}>
-                {c.connection === 'ready' ? c.account : c.connection === 'disconnected' ? 'Disconnected' : 'Connecting…'}
+                {c.connection === 'ready' ? this.t(c.account) : c.connection === 'disconnected' ? this.t("Disconnected") : this.t("Connecting…")}
               </seg>
-              {c.notices.some(n => !n.error) && <seg key="notice" icon="info" title="Codex notices" onClick={() => this.openPanel('details')}>Notice</seg>}
+              {c.notices.some(n => !n.error) && <seg key="notice" icon="info" title={this.t("Codex notices")} onClick={() => this.openPanel('details')}>{this.t("Notice")}</seg>}
             </status>
             {(c.operation || !!this.pasting) && <row key="working" role="ct.working" gap="xs" align="center">
-              {!c.selecting && <spinner style="starburst" />}<text tone="muted" text={this.pasting ? 'Pasting…' : c.operation} />
+              {!c.selecting && <spinner style="starburst" />}<text tone="muted" text={this.pasting ? this.t("Pasting…") : this.t(c.operation)} />
             </row>}
           </row>
-        </ComposerFrame>
+        </ComposerFrame>}
       </col> as Node,
       layer: <col>{!this.panel && (this.draft.describe().c ?? []).filter((n): n is import('@oh-my-pi/pi-tui/native/node').NativeNode => 'k' in n && n.k === 'overlay')
         .map(n => ompNode(n, this.draft.context, () => this.render()))}
@@ -960,6 +1053,8 @@ export class NativeUI {
         <col key="body" gap="sm">{this.renderPanel()}{!['workspace', 'details', 'rename'].includes(this.panel) && <><rule />{this.button('Close · Esc', () => this.closePanel())}</>}</col>
       </overlay>}</col> as Node,
     });
+    this.renderedResult = c.thread ? c.sessionResult(c.thread.id) : undefined;
+    this.resultRender++; this.resultView = undefined; this.scheduleResultRead();
   }
 
   private shortPath(path: string) {
@@ -968,45 +1063,50 @@ export class NativeUI {
     return short.length > 52 ? '…/' + short.split('/').slice(-3).join('/') : short;
   }
 
-  private isPicker() { return ['history', 'models', 'default-model', 'folders', 'effort', 'send-mode', 'menu'].includes(this.panel ?? ''); }
+  private isPicker() { return ['history', 'models', 'default-model', 'folders', 'effort', 'send-mode', 'menu', 'language', 'skills'].includes(this.panel ?? ''); }
 
   private pickerItems(): PickerItem[] {
     const c = this.c;
     let items: PickerItem[];
     switch (this.panel) {
-      case 'history': items = c.threads.map(t => ({ id: t.id, label: t.name || t.preview || 'New session',
-        detail: this.shortPath(t.cwd), icon: 'message', facts: { updated: new Date(t.updatedAt * 1000).toLocaleDateString('en-US') } })); break;
+      case 'skills': items = c.skills.items.map(s => ({ id: s.path, label: `$${s.name}`,
+        detail: `${s.path} · ${s.description}`, title: s.path, icon: 'file' })); break;
+      case 'history': items = c.threads.map(t => ({ id: t.id, label: t.name || t.preview || this.t("New session"),
+        detail: this.shortPath(t.cwd), icon: 'message', facts: { updated: new Date(t.updatedAt * 1000).toLocaleDateString(c.preferences.language === 'zh-CN' ? 'zh-CN' : 'en-US') } })); break;
       case 'models': items = c.models.map(m => ({ id: m.model, label: m.displayName, detail: m.description,
-        icon: 'model', badges: c.model === m.model ? [{ text: 'Current', tone: 'accent' }] : undefined })); break;
+        icon: 'model', badges: c.model === m.model ? [{ text: this.t("Current"), tone: 'accent' }] : undefined })); break;
       case 'default-model': items = [
-        { id: 'codex-default', label: 'Use Codex default', detail: 'Follow the model configured in Codex.', icon: 'settings',
-          badges: !c.newSessionModel ? [{ text: 'Default', tone: 'accent' }] : undefined },
+        { id: 'codex-default', label: this.t("Use Codex default"), detail: this.t("Follow the model configured in Codex."), icon: 'settings',
+          badges: !c.newSessionModel ? [{ text: this.t("Default"), tone: 'accent' }] : undefined },
         ...c.models.filter(m => !m.hidden).map(m => ({ id: m.model, label: m.displayName, detail: m.description,
-          icon: 'model', badges: c.newSessionModel === m.model ? [{ text: 'Default', tone: 'accent' as const }] : undefined })),
+          icon: 'model', badges: c.newSessionModel === m.model ? [{ text: this.t("Default"), tone: 'accent' as const }] : undefined })),
       ]; break;
+      case 'language': items = [{ id: 'en', label: 'English' }, { id: 'zh-CN', label: '简体中文' }]; break;
       case 'folders': items = this.folderBrowser.items; break;
       case 'effort': items = (c.models.find(m => m.model === c.model)?.supportedReasoningEfforts ?? []).map(o => ({
-        id: o.reasoningEffort, label: o.reasoningEffort, detail: o.description, icon: 'brain',
-        badges: c.effort === o.reasoningEffort ? [{ text: 'Current', tone: 'accent' }] : undefined })); break;
+        id: o.reasoningEffort, label: this.t(o.reasoningEffort), detail: o.description, icon: 'brain',
+        badges: c.effort === o.reasoningEffort ? [{ text: this.t("Current"), tone: 'accent' }] : undefined })); break;
       case 'send-mode': items = [
-        { id: 'steer', label: 'Steer', detail: 'Add input to the current turn.' },
-        { id: 'queue', label: 'Queue', detail: 'Send after the current turn finishes.' },
+        { id: 'steer', label: this.t("Steer"), detail: this.t("Add input to the current turn.") },
+        { id: 'queue', label: this.t("Queue"), detail: this.t("Send after the current turn finishes.") },
       ]; break;
       default: items = [
-        { id: 'new', label: 'New session', icon: 'plus', detail: 'Ctrl+Shift+N' },
-        { id: 'history', label: 'Resume session', icon: 'history', detail: 'Ctrl+L' },
-        { id: 'workspace', label: 'Switch workspace', icon: 'folder' },
-        { id: 'attach', label: 'Attach image', icon: 'image' },
-        { id: 'models', label: 'Choose model', icon: 'model', detail: 'Ctrl+Shift+P' },
-        { id: 'default-model', label: 'New session model', icon: 'settings', detail: modelName(c, c.newSessionModel) },
-        { id: 'effort', label: 'Reasoning effort', icon: 'brain' },
-        ...(c.diff ? [{ id: 'diff', label: 'View changes', icon: 'diff' }] : []),
-        { id: 'details', label: 'Session details', icon: 'info' },
-        { id: 'notifications', label: c.notifications ? 'Turn off completion reminders' : 'Turn on completion reminders', icon: 'bell' },
-        { id: 'editing', label: this.draft.vim ? 'Use standard editing' : 'Enable Vim editing', icon: 'keyboard' },
-        ...(this.reloadWindow ? [{ id: 'reload', label: 'Developer: Reload Window',
-          detail: 'Load the latest interface and keep tasks running.' }] : []),
-        { id: 'help', label: 'Keyboard shortcuts', icon: 'keyboard' },
+        { id: 'skills', label: this.t('Skills'), icon: 'file' },
+        { id: 'language', label: this.t('Interface language'), icon: 'settings', detail: c.preferences.language === 'zh-CN' ? '简体中文' : 'English' },
+        { id: 'new', label: this.t("New session"), icon: 'plus', detail: this.t("Ctrl+Shift+N") },
+        { id: 'history', label: this.t("Resume session"), icon: 'history', detail: this.t("Ctrl+L") },
+        { id: 'workspace', label: this.t("Switch workspace"), icon: 'folder' },
+        { id: 'attach', label: this.t("Attach image"), icon: 'image' },
+        { id: 'models', label: this.t("Choose model"), icon: 'model', detail: this.t("Ctrl+Shift+P") },
+        { id: 'default-model', label: this.t("New session model"), icon: 'settings', detail: c.newSessionModel ? modelName(c, c.newSessionModel) : this.t('Use Codex default') },
+        { id: 'effort', label: this.t("Reasoning effort"), icon: 'brain' },
+        ...(c.diff ? [{ id: 'diff', label: this.t("View changes"), icon: 'diff' }] : []),
+        { id: 'details', label: this.t("Session details"), icon: 'info' },
+        { id: 'notifications', label: c.notifications ? this.t("Turn off completion reminders") : this.t("Turn on completion reminders"), icon: 'bell' },
+        { id: 'editing', label: this.draft.vim ? this.t("Use standard editing") : this.t("Enable Vim editing"), icon: 'keyboard' },
+        ...(this.reloadWindow ? [{ id: 'reload', label: this.t("Developer: Reload Window"),
+          detail: this.t("Load the latest interface and keep tasks running.") }] : []),
+        { id: 'help', label: this.t("Keyboard shortcuts"), icon: 'keyboard' },
       ];
     }
     const query = this.dialogDraft.text.toLowerCase().trim();
@@ -1016,29 +1116,31 @@ export class NativeUI {
   private renderPicker() {
     const items = this.pickerItems();
     const folders = this.panel === 'folders', defaults = this.panel === 'default-model';
-    const error = defaults ? this.preferenceError : folders ? this.folderBrowser.error : '';
+    const error = defaults ? this.preferenceError : folders ? this.folderBrowser.error : this.panel === 'skills' ? this.c.skills.error : '';
     if (!items.some(i => i.id === this.pickerSelected)) this.pickerSelected = items[0]?.id ?? '';
     return <picker key="panel" size="md" layout="rows" preview="none" title={this.panelTitle()}
-      subtitle={defaults ? 'Saved for new sessions in every workspace. Existing sessions keep their model.' : folders ? this.folderBrowser.directory : undefined}
+      subtitle={defaults ? this.t("Saved for new sessions in every workspace. Existing sessions keep their model.") : folders ? this.folderBrowser.directory : undefined}
       icon={folders ? 'folder-open' : defaults || this.panel === 'models' ? 'model' : this.panel === 'history' ? 'history' : 'search'}
-      query={this.dialogDraft.text} cursor={this.dialogDraft.cursor} placeholder="Type to filter…" focus="list"
-      items={items} selected={this.pickerSelected} empty={folders ? 'No folders here' : 'No matches'}
-      state={(this.historyLoading && this.panel === 'history') || (folders && this.folderBrowser.loading) || (defaults && this.preferenceSaving) ? 'loading' : error ? 'error' : 'ready'}
+      query={this.dialogDraft.text} cursor={this.dialogDraft.cursor} placeholder={this.t("Type to filter…")} focus="list"
+      items={items} selected={this.pickerSelected} empty={folders ? this.t("No folders here") : this.t("No matches")}
+      state={(this.panel === 'skills' && this.c.skills.loading) || (this.historyLoading && this.panel === 'history') || (folders && this.folderBrowser.loading) || (defaults && this.preferenceSaving) ? 'loading' : error ? 'error' : 'ready'}
       message={error || undefined}
-      current={this.panel === 'models' ? [this.c.model] : this.panel === 'effort' ? [this.c.effort]
+      current={this.panel === 'language' ? [this.c.preferences.language] : this.panel === 'models' ? [this.c.model] : this.panel === 'effort' ? [this.c.effort]
         : defaults ? [this.c.newSessionModel ?? 'codex-default'] : this.panel === 'send-mode' ? [this.sendMode] : this.panel === 'history' ? [this.c.thread?.id ?? ''] : []}
       actions={[
-        { id: 'confirm', label: folders ? 'Open folder' : defaults ? 'Set default' : this.panel === 'history' ? 'Resume' : 'Select', keys: ['enter'], primary: !folders,
+        { id: 'confirm', label: folders ? this.t("Open folder") : defaults ? this.t("Set default") : this.panel === 'history' ? this.t("Resume") : this.t("Select"), keys: ['enter'], primary: !folders,
           disabled: !items.length || (defaults && this.preferenceSaving) || (folders && this.folderBrowser.loading) || undefined },
-        ...(folders ? [{ id: 'use-folder', label: 'Use this folder', primary: true as const,
+        ...(folders ? [{ id: 'use-folder', label: this.t("Use this folder"), primary: true as const,
           disabled: this.folderBrowser.loading || !!this.folderBrowser.error || undefined }] : []),
-        ...(this.panel === 'history' ? [{ id: 'scope', label: this.allThreads ? 'All workspaces' : 'This workspace', on: this.allThreads },
-          ...(this.c.threadsCursor ? [{ id: 'more', label: 'Load more' }] : [])] : []),
-        { id: 'close', label: 'Close', keys: ['esc'], end: true },
+        ...(this.panel === 'skills' ? [{ id: 'refresh-skills', label: this.t('Refresh skills'), disabled: this.c.skills.loading || undefined }] : []),
+        ...(this.panel === 'history' ? [{ id: 'scope', label: this.allThreads ? this.t("All workspaces") : this.t("This workspace"), on: this.allThreads },
+          ...(this.c.threadsCursor ? [{ id: 'more', label: this.t("Load more") }] : [])] : []),
+        { id: 'close', label: this.t("Close"), keys: ['esc'], end: true },
       ]}
       onSelect={e => { this.pickerSelected = e.item; this.render(); }}
       onActivate={e => { this.pickerSelected = e.item; this.activatePicker(); }}
       onAction={{ confirm: () => this.activatePicker(), close: () => this.closePanel(),
+        'refresh-skills': () => this.action(async () => { await this.c.skills.list(); }),
         'use-folder': () => this.useFolder(),
         scope: () => { this.allThreads = !this.allThreads; this.action(() => this.c.listThreads(this.allThreads)); },
         more: () => this.action(() => this.c.listThreads(this.allThreads, true)) }}
@@ -1049,7 +1151,18 @@ export class NativeUI {
   private activatePicker() {
     const id = this.pickerSelected;
     if (!id) return;
-    if (this.panel === 'history') this.action(async () => { this.closePanel(); await this.openSession(id); });
+    if (this.panel === 'skills') {
+      const skill = this.c.skills.items.find(s => s.path === id);
+      if (!skill || this.c.skills.loading) return;
+      const selected = { type: 'skill' as const, name: skill.name, path: skill.path };
+      // A typed marker is bound to the selected path without rewriting the draft.
+      if (!skillNames(this.draft.text).includes(skill.name)) this.draft.editor.insertText(`${this.draft.cursor && !/\s/.test(this.draft.text[this.draft.cursor - 1]!) ? ' ' : ''}$${skill.name} `);
+      this.draft.selectSkill(selected); this.closePanel();
+    }
+    else if (this.panel === 'history') this.action(async () => { this.closePanel(); await this.openSession(id); });
+    else if (this.panel === 'language' && isLanguage(id)) this.action(async () => {
+      await this.c.preferences.setLanguage(id); this.c.changed(); this.closePanel();
+    });
     else if (this.panel === 'default-model') this.action(() => this.saveDefaultModel(id));
     else if (this.panel === 'folders') { if (!this.folderBrowser.loading) this.action(() => this.readFolders(id)); }
     else if (this.panel === 'models') this.action(async () => { this.c.chooseModel(id); this.closePanel(); });
@@ -1065,21 +1178,21 @@ export class NativeUI {
   }
 
   private panelTitle() {
-    return ({ history: 'Sessions', models: 'Select model', 'default-model': 'New session model', folders: 'Choose a folder', effort: 'Reasoning effort', 'send-mode': 'Send while running', workspace: 'New session in a workspace', attach: 'Attach image', rename: 'Rename session', details: 'Session details', help: 'Getting started', diff: 'Changes', menu: 'Actions' })[this.panel!];
+    return this.t(({ skills: 'Skills', language: 'Interface language', history: 'Sessions', models: 'Select model', 'default-model': 'New session model', folders: 'Choose a folder', effort: 'Reasoning effort', 'send-mode': 'Send while running', workspace: 'New session in a workspace', attach: 'Attach image', rename: 'Rename session', details: 'Session details', help: 'Getting started', diff: 'Changes', menu: 'Actions' })[this.panel!]);
   }
   private renderPanel() {
     const c = this.c;
     switch (this.panel) {
       case 'rename': return <>
-        <html.div class="ct-field-heading">Session name</html.div>
-        <input key="field" role="ct.session.name" aria="Session name" text={this.dialogDraft.text}
-          cursor={this.dialogDraft.cursor} anchor={this.dialogDraft.anchor} placeholder="Session name" readonly={this.renaming?.saving}
+        <html.div class="ct-field-heading">{this.t("Session name")}</html.div>
+        <input key="field" role="ct.session.name" aria={this.t("Session name")} text={this.dialogDraft.text}
+          cursor={this.dialogDraft.cursor} anchor={this.dialogDraft.anchor} placeholder={this.t("Session name")} readonly={this.renaming?.saving}
           onEdit={e => { if (!this.renaming?.saving) this.dialogDraft.nativeEdit(e); this.render(); }}
           onUndo={() => { if (!this.renaming?.saving) this.dialogDraft.undo(); this.render(); }}
           onFocus={() => { this.focused = 'layer.panel.body.field'; this.surface.focus(this.focused); }} />
         {!!this.renaming?.error && <html.div class="ct-field-error" role="ct.rename.error"><icon name="warn" />{this.renaming.error}</html.div>}
         <html.div class="ct-dialog-footer">
-          <html.span class="ct-footer-hint">Enter to save · Esc to cancel</html.span>
+          <html.span class="ct-footer-hint">{this.t("Enter to save · Esc to cancel")}</html.span>
           {this.button('Cancel', () => this.closePanel())}
           {this.button(this.renaming?.saving ? 'Saving…' : 'Save name', () => { void this.confirmRename(); }, 'ct-primary',
             !!this.renaming?.saving || !this.dialogDraft.text.trim())}
@@ -1092,16 +1205,16 @@ export class NativeUI {
         browse={() => this.action(() => this.browseFolders())} chooseDefault={() => this.openModelPicker('default-model')}
         submit={() => this.action(() => this.confirmPath())} close={() => this.closePanel()} />;
       case 'attach': return <>
-        <text tone="muted" text="Enter the full path to an image to attach it to your next message." />
+        <text tone="muted" text={this.t("Enter the full path to an image to attach it to your next message.")} />
         <input key="field" text={this.dialogDraft.text} cursor={this.dialogDraft.cursor} anchor={this.dialogDraft.anchor}
-          placeholder="/full/path" onEdit={e => { this.dialogDraft.nativeEdit(e); this.render(); }}
+          placeholder={this.t("/full/path")} onEdit={e => { this.dialogDraft.nativeEdit(e); this.render(); }}
           onUndo={() => { this.dialogDraft.undo(); this.render(); }} onFocus={() => { this.focused = 'layer.panel.body.field'; this.surface.focus(this.focused); }} />
         {this.button('Attach image', () => this.action(() => this.confirmPath()), 'ct-primary')}
       </>;
       case 'details': return <SessionDetails c={c} chooseModel={() => this.openModelPicker('models')}
         chooseEffort={() => this.openModelPicker('effort')} chooseDefault={() => this.openModelPicker('default-model')} close={() => this.closePanel()} />;
       case 'diff': return <diff text={c.diff} mode="unified" />;
-      case 'help': return <md text={`**Keyboard shortcuts**\n\n- Ctrl+A / Ctrl+E — Start / end of line\n- Ctrl+B / Ctrl+F — Move left / right\n- Ctrl+P / Ctrl+N — Move up / down\n- Option+Left / Right — Move by word\n- Ctrl+H / Ctrl+D — Delete backward / forward\n- Ctrl+U / Ctrl+K / Ctrl+W — Delete to line start / end / previous word\n- Ctrl+Y / Option+Y — Restore deleted text / cycle earlier deletions\n- Command+A — Select all\n- Command+Z / Command+Shift+Z — Undo / redo\n- Enter — Send message\n- Shift+Enter — New line\n- Command+, — Tern terminal settings\n- Tab — Complete file paths\n- Command+V — Paste text, files or images through Tern\n- Ctrl+V — Paste from the system clipboard\n- Ctrl+Shift+N — New session\n- Ctrl+L — Resume session\n- Ctrl+Shift+P — Select model\n- Ctrl+Shift+R — Reload window without stopping tasks\n- Ctrl+C — Stop the current turn; quit when idle\n- Ctrl+Q — Quit\n- Esc — Close a panel\n\nUse **New session** above the sidebar list to start a conversation in the current folder. Other sessions keep their tasks and drafts.\n\nWhile Codex is working, choose **Steer** to add input to the current turn, or **Queue** to save it for the next turn. A stop or error pauses the local queue.\n\nPaste an image to see a thumbnail before sending. Click it to preview; use × to remove it. Image file paths and **Attach image** in the actions menu also work. Copy a PDF or another document in Finder and paste it to insert a Markdown file link.\n\nThis prototype does not support complex MCP forms, secure input, voice, or desktop host tools.`} />;
+      case 'help': return <md text={commandHelp(false, this.c.preferences.language).split("\n").map(line => "- " + line).join("\n") + "\n\n" + this.t("**Keyboard shortcuts**\n\n- Ctrl+A / Ctrl+E — Start / end of line\n- Ctrl+B / Ctrl+F — Move left / right\n- Ctrl+P / Ctrl+N — Move up / down\n- Option+Left / Right — Move by word\n- Ctrl+H / Ctrl+D — Delete backward / forward\n- Ctrl+U / Ctrl+K / Ctrl+W — Delete to line start / end / previous word\n- Ctrl+Y / Option+Y — Restore deleted text / cycle earlier deletions\n- Command+A — Select all\n- Command+Z / Command+Shift+Z — Undo / redo\n- Enter — Send message\n- Shift+Enter — New line\n- Command+, — Tern terminal settings\n- Tab — Complete file paths\n- Command+V — Paste text, files or images through Tern\n- Ctrl+V — Paste from the system clipboard\n- Ctrl+Shift+N — New session\n- Ctrl+L — Resume session\n- Ctrl+Shift+P — Select model\n- Ctrl+Shift+R — Reload window without stopping tasks\n- Ctrl+C — Stop the current turn; quit when idle\n- Ctrl+Q — Quit\n- Esc — Close a panel\n\nUse **New session** above the sidebar list to start a conversation in the current folder. Other sessions keep their tasks and drafts.\n\nWhile Codex is working, choose **Steer** to add input to the current turn, or **Queue** to save it for the next turn. A stop or error pauses the local queue.\n\nPaste an image to see a thumbnail before sending. Click it to preview; use × to remove it. Image file paths and **Attach image** in the actions menu also work. Copy a PDF or another document in Finder and paste it to insert a Markdown file link.\n\nThis prototype does not support complex MCP forms, secure input, voice, or desktop host tools.")} />;
       default: return null;
     }
   }
@@ -1118,7 +1231,7 @@ export class NativeUI {
       void load.then(image => this.cacheImage(image, path)).catch(() => this.failedPreviews.add(path))
         .finally(() => { this.loadingPreviews.delete(path); this.schedule(); });
     }
-    return <text key={path} tone="muted" text={this.failedPreviews.has(path) ? 'Image unavailable' : 'Loading image…'} />;
+    return <text key={path} tone="muted" text={this.failedPreviews.has(path) ? this.t("Image unavailable") : this.t("Loading image…")} />;
   }
 
   private cacheImage(image: PreviewImage, key = image.path) {
@@ -1218,28 +1331,71 @@ export class NativeUI {
   }
 
   async send() {
-    if (this.pasting) return;
+    if (this.chiefGuard && this.c.thread?.id === await this.chiefGuard.id()) { this.c.notice(reservedMessage, true); return; }
+    if (this.pasting || this.resolvingSkills || this.panel) return;
     const text = this.draft.submittedText;
     if (this.answerTarget) {
       const r = this.c.requests.find(r => r.id === this.answerTarget!.requestId);
       if (r && text.trim()) r.answers[this.answerTarget.questionId] = [text];
       this.finishAnswer(); this.render(); return;
     }
+    const command = parseCommand(text, this.images);
+    if (command.kind === 'error') { this.c.notice(this.t(command.message), true); return; }
+    if (command.kind === 'command') {
+      if (command.name === 'language' && command.args && !isLanguage(command.args)) {
+        this.c.notice('Usage: /language [en|zh-CN]', true); return;
+      }
+      if (command.name === 'model' && command.args && !this.c.models.some(m => !m.hidden && m.model === command.args)) {
+        this.c.notice(this.t('Choose an available model.'), true); return;
+      }
+      const composer = this.composer, input = composer.take(); this.syncComposer();
+      try {
+        switch (command.name) {
+          case 'exit': await this.close(); return;
+          case 'help': this.openPanel('help'); break;
+          case 'new': if (!await this.newSession()) throw new Error('Could not create a session.'); break;
+          case 'resume':
+            if (!command.args) this.openPanel('history');
+            else if (!await this.openSession(command.args)) throw new Error('This session is unavailable.');
+            break;
+          case 'model': if (command.args) this.c.chooseModel(command.args); else this.openPanel('models'); break;
+          case 'status': this.openPanel('details'); break;
+          case 'stop': await this.c.stop(); break;
+          case 'language':
+            if (isLanguage(command.args)) { await this.c.preferences.setLanguage(command.args); this.c.changed(); }
+            else this.openPanel('language');
+            break;
+          case 'skills': this.openPanel('skills', command.args); break;
+        }
+        input.draft.addHistory(text);
+      } catch (error) { composer.restore(input); this.c.notice(this.t((error as Error).message), true); }
+      this.render(); return;
+    }
     if (!text.trim() && !this.images.length) return;
     if (!this.c.sessionReady) { this.c.notice('Reconnect and open this session before sending.'); return; }
     if (this.c.operation) return;
     if (this.c.unconfirmed.length) { this.c.notice('Check the unconfirmed message before sending again.'); return; }
     const composer = this.composer, threadId = this.c.thread?.id;
+    if (skillNames(text).length) {
+      const revision = this.draft.revision, cwd = this.c.cwd;
+      this.resolvingSkills = true;
+      try {
+        const skills = await this.c.skills.resolve(text, this.draft.selectedSkills);
+        if (this.composer !== composer || this.draft.revision !== revision || this.c.cwd !== cwd || this.c.thread?.id !== threadId || this.answerTarget || this.panel) return;
+        this.draft.selectedSkills = skills;
+      } catch (error) { this.c.notice(this.t((error as Error).message), true); return; }
+      finally { this.resolvingSkills = false; this.render(); }
+    }
     const input = composer.take();
     // Clear optimistically for responsive typing, but restore rejected input intact.
     this.syncComposer();
     try {
-      const sending = this.c.submit(input.text, input.images, this.sendMode);
+      const sending = this.c.submit(input.text, input.images, this.sendMode, input.skills);
       this.render();
       await sending; input.draft.addHistory(text);
     }
     catch (e) {
-      if (!isRpcOutcomeUnknown(e) && !composer.restore(input)) this.c.preserveInput(threadId, input.text, input.images);
+      if (!isRpcOutcomeUnknown(e) && !composer.restore(input)) this.c.preserveInput(threadId, input.text, input.images, input.skills);
       if (threadId) this.saveComposer(threadId, composer);
       this.c.sessionNotice(threadId, e instanceof Error ? e.message : String(e), true);
     }
@@ -1254,6 +1410,7 @@ export class NativeUI {
   handleKey(key: Key): boolean {
     if (key.ctrl && key.name === 'q') return false;
     if (key.ctrl && key.shift && !key.meta && !key.alt && key.name === 'r') { this.requestReload(); return true; }
+    this.noteInteraction();
     if (this.pasting && !(key.ctrl && key.name === 'c')) { this.deferredKeys.push(key); return true; }
     if (key.ctrl && key.name === 'v') { this.action(() => this.pasteClipboard()); return true; }
     if (key.ctrl && key.name === 'c') {
@@ -1292,7 +1449,12 @@ export class NativeUI {
     if (key.ctrl && key.shift && !key.alt && !key.meta && key.name === 'p') { this.openPanel('models'); return true; }
     if (key.name === 'enter' && !key.shift && !key.alt && !this.draft.completing) void this.send();
     else if (key.name === 'paste') this.pasteText(key.text ?? '');
-    else { this.draft.key(key); this.render(); }
+    else {
+      const completing = this.draft.completing;
+      this.draft.key(key); this.render();
+      if (completing && key.name === 'enter' && !key.shift && !key.alt && !this.answerTarget
+        && !this.draft.completing && parseCommand(this.draft.submittedText, this.images).kind === 'command') void this.send();
+    }
     return true;
   }
 
@@ -1303,6 +1465,7 @@ export class NativeUI {
     this.c.off('completion', this.onCompletion);
     if (this.completionTimer) clearTimeout(this.completionTimer);
     if (this.renderTimer) clearTimeout(this.renderTimer);
+    if (this.resultReadTimer) clearTimeout(this.resultReadTimer);
   }
 
   async close() {

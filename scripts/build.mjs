@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { zhCN } from '../src/i18n.ts';
 import { writeFile } from 'node:fs/promises';
 import { appearanceStyles } from '../src/appearance.ts';
 import { buildUI } from './build-ui.mjs';
@@ -21,3 +22,7 @@ await buildUI();
 // in sync with the program sheet, without restarting those conversations.
 await writeFile(new URL('../tern-plugin/appearance.css', import.meta.url),
   `/* Generated from src/appearance.ts by bun run build. */\n[data-surface="codex-tern"] {\n${appearanceStyles}\n}\n`);
+
+const luaStrings = Object.entries(zhCN).map(([key, value]) => `  [${JSON.stringify(key)}] = ${JSON.stringify(value)},`).join('\n');
+await writeFile(new URL('../tern-plugin/i18n.luau', import.meta.url),
+  `-- Generated from src/i18n.ts by bun run build.\nlocal strings = {\n${luaStrings}\n}\nreturn function(language, value)\n  return if language == "zh-CN" then strings[value] or value else value\nend\n`);

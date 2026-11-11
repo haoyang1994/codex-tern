@@ -1,3 +1,6 @@
+local translate = require("./i18n")
+local language = "en"
+local function t(value) return translate(language, value) end
 -- Presentation only. The client owns the independent outline agent and every prompt link.
 local toc = {}
 local function nodes(value)
@@ -10,6 +13,7 @@ local function nodes(value)
 end
 
 function toc.view(snapshot, entry)
+  local function t(value) return translate(snapshot.language, value) end
   local value = snapshot.toc
   if snapshot.tocProtocol ~= 1 or not value then return nil end
   entry = entry or {}
@@ -71,19 +75,19 @@ function toc.view(snapshot, entry)
   if value.error and value.error ~= "" then
     table.insert(footer, {k = "text", p = {key = "error", role = "codex-tern.toc.note", text = value.error, lines = 3}})
   elseif #content == 0 and value.enabled and not value.updating then
-    table.insert(footer, {k = "text", p = {key = "empty", role = "codex-tern.toc.note", text = "Topics appear as you chat."}})
+    table.insert(footer, {k = "text", p = {key = "empty", role = "codex-tern.toc.note", text = t("Topics appear as you chat.")}})
   end
   if not value.updating and (not value.enabled or (value.error and value.error ~= "")) then
     table.insert(footer, {k = "text", p = {key = "get", role = "codex-tern.toc.get",
-      text = if value.enabled then "Retry" else "Get TOC", mark = if enabled then nil else "disabled",
+      text = if value.enabled then t("Retry") else t("Get TOC"), mark = if enabled then nil else "disabled",
       actions = if enabled then {click = "toc-get"} else nil}})
   end
   return {k = "col", p = {key = "toc", role = "codex-tern.toc", mark = snapshot.tocClient}, c = {
     {k = "row", p = {key = "head", role = "codex-tern.toc.head", align = "center", gap = "sm"}, c = {
-      {k = "text", p = {key = "title", grow = 1, text = "This session"}},
-      {k = "text", p = {key = "status", role = "codex-tern.toc.status", text = if value.updating then "Updating…" else ""}},
-      {k = "icon", p = {key = "menu", name = "more", title = "TOC options", hidden = not value.enabled,
-        actions = if enabled and not value.updating then {menu = {"Rebuild TOC"}} else nil}},
+      {k = "text", p = {key = "title", grow = 1, text = t("This session")}},
+      {k = "text", p = {key = "status", role = "codex-tern.toc.status", text = if value.updating then t("Updating…") else ""}},
+      {k = "icon", p = {key = "menu", name = "more", title = t("TOC options"), hidden = not value.enabled,
+        actions = if enabled and not value.updating then {menu = {t("Rebuild TOC")}} else nil}},
     }},
     -- Native lists reveal a new selection, but do not re-reveal it when max shrinks.
     -- A new size gets a fresh bounded list, with the same current heading selected.
@@ -94,11 +98,12 @@ function toc.view(snapshot, entry)
 end
 
 function toc.action(ev, snapshot, entry, send, repaint)
+  language = snapshot.language or "en"
   if ev.act ~= "toc-get" and ev.act ~= "toc-jump" and ev.act ~= "toc-visit" and ev.act ~= "toc-fold"
-    and ev.act ~= "Rebuild TOC" then return false end
+    and ev.act ~= "Rebuild TOC" and ev.act ~= t("Rebuild TOC") then return false end
   local value = snapshot.toc
   if not value or value.threadId ~= snapshot.current or (entry.selection and entry.selection.id ~= value.threadId) then return true end
-  if ev.act == "toc-get" or ev.act == "Rebuild TOC" then
+  if ev.act == "toc-get" or (ev.act == "Rebuild TOC" or ev.act == t("Rebuild TOC")) then
     if snapshot.connected and snapshot.canSwitch and not value.updating then
       send(if ev.act == "toc-get" then "toc-get" else "toc-rebuild", value.threadId)
     end

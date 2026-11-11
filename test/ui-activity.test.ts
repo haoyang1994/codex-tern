@@ -39,7 +39,7 @@ function setup() {
   item('command', 'commandExecution', { command: 'echo ready', status: 'completed', exitCode: 0 });
   item('question', 'agentMessage', { phase: 'final_answer', text: 'Should I change the core rules too?' });
   const working = () => { ui.render(); return nodes(frame.dock).find(n => n.props.role === 'omp.working'); };
-  return { ui, c, session, transport, emit, item, render, working };
+  return { ui, c, session, transport, emit, item, render, working, main: () => frame.main };
 }
 
 test('a delivered answer and later steering keep activity live until the turn completes', async t => {
@@ -54,10 +54,10 @@ test('a delivered answer and later steering keep activity live until the turn co
   // Finishing individual items still does not finish the turn.
   item('reasoning', 'reasoning', { summary: ['Checking the source rules.'] });
   item('answer', 'agentMessage', { phase: 'final_answer', text: 'The source rules are updated.' });
-  assert.deepEqual(render(), { states: ['Worked', 'Activity'], spinners: 1, stop: true, previews: 1 });
+  assert.deepEqual(render(), { states: ['Activity'], spinners: 1, stop: true, previews: 1 });
 
   emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } });
-  assert.deepEqual(render(), { states: ['Worked', 'Worked'], spinners: 0, stop: false, previews: 0 });
+  assert.deepEqual(render(), { states: ['Worked'], spinners: 0, stop: false, previews: 0 });
 });
 
 test('input requested after an answer stays visible and returns to Working when resolved', t => {
@@ -75,6 +75,7 @@ test('continued work shows its actual terminal status after an earlier answer', 
     await t.test(status, t => {
       const { ui, transport, emit, item, render } = setup(); t.after(() => ui.close());
       item('reasoning', 'reasoning', { summary: ['Checking the source rules.'] }, false);
+      item('continued-command', 'commandExecution', { command: 'echo continuing', status: 'inProgress' }, false);
       assert.equal(render().states.at(-1), 'Activity');
       if (status === 'disconnected') transport.emit('disconnected', 'Codex disconnected');
       else emit('turn/completed', { turn: { id: 'turn', status, items: [] } });
@@ -96,4 +97,43 @@ test('the dock shows work before any activity arrives and while an answer stream
   assert.equal(nodes(working()!).filter(n => n.kind === 'shimmer').length, 0);
   c.activeTurn = null;
   assert.equal(working(), undefined);
+});
+
+test('interleaved commentary stays outside collapsed tool blocks and streams once in chronological order', t => {
+  const { ui, c, emit, item, render, main } = setup(); t.after(() => ui.close());
+  c.items = [];
+  item('before', 'agentMessage', { phase: 'commentary', text: 'I will inspect the release request.' });
+  item('tool-a', 'commandExecution', { command: 'echo first', status: 'completed', exitCode: 0 });
+  item('progress', 'agentMessage', { phase: 'commentary', text: 'I found ', }, false);
+  emit('item/agentMessage/delta', { itemId: 'progress', delta: 'the release.' });
+  item('progress', 'agentMessage', { phase: 'commentary', text: 'I found the release.' });
+  item('tool-b', 'commandExecution', { command: 'echo second', status: 'completed', exitCode: 0 });
+  item('final', 'agentMessage', { phase: 'final_answer', text: 'Release checks are complete.' });
+  emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();
+  const blocks = main().children.map(wrapper => wrapper.children[0]!);
+  assert.deepEqual(blocks.map(n => n.props.role === 'omp.assistant' ? 'assistant' : n.props.class === 'ct-activity' ? 'tools' : 'result'),
+    ['assistant', 'tools', 'assistant', 'tools', 'assistant', 'result']);
+  assert.equal(nodes(main()).filter(n => n.props.role === 'ct.activity.details').length, 0, 'tools are collapsed');
+  assert.deepEqual(nodes(main()).filter(n => n.kind === 'md').map(n => n.props.text),
+    ['I will inspect the release request.', 'I found the release.', 'Release checks are complete.']);
+  assert.equal(c.items.filter(i => i.item.id === 'progress').length, 1);
+});
+
+
+test('public streamed summary and plan remain visible outside tool folds without hidden reasoning', t => {
+  const { ui, c, emit, item, render, main } = setup(); t.after(() => ui.close()); c.items = [];
+  item('command-a', 'commandExecution', { command: 'echo first', status: 'completed' });
+  item('summary', 'reasoning', { summary: [], content: ['HIDDEN_REASONING'] }, false);
+  emit('item/reasoning/summaryTextDelta', { itemId: 'summary', summaryIndex: 0, delta: 'Public progress' });
+  render();
+  assert.ok(nodes(main()).some(n => n.kind === 'md' && n.props.text === 'Public progress'));
+  item('summary', 'reasoning', { summary: ['Public progress'], content: ['HIDDEN_REASONING'] });
+  item('plan', 'plan', { text: 'Public plan progress' });
+  item('command-b', 'commandExecution', { command: 'echo second', status: 'completed' });
+  emit('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } }); render();
+  const visible = nodes(main());
+  assert.equal(visible.filter(n => n.props.role === 'ct.activity.details').length, 0);
+  assert.deepEqual(visible.filter(n => n.kind === 'md').map(n => n.props.text), ['Public progress', 'Public plan progress']);
+  assert.ok(visible.filter(n => ['omp.thinking', 'omp.progress.plan'].includes(String(n.props.role))).every(n => !n.props.collapsible && !n.props.collapsed));
+  assert.equal(JSON.stringify(main()).includes('HIDDEN_REASONING'), false);
 });

@@ -1,3 +1,4 @@
+import { NATIVE_ABI_VERSION } from './native-abi';
 import { connect, type Session, type Surface } from '@stencil-hq/tern';
 import { readFile } from 'node:fs/promises';
 import type { Controller } from './controller';
@@ -21,7 +22,7 @@ export async function loadNativeUI(manifest = new URL('../dist/ui.json', import.
 }
 
 function validate(module: UIModule) {
-  if (module.UI_API_VERSION !== 4 || typeof module.NativeUI !== 'function')
+  if (module.UI_API_VERSION !== NATIVE_ABI_VERSION || typeof module.NativeUI !== 'function')
     throw new Error('This update needs a client restart. Finish running tasks, then restart codex-tern.');
 }
 
@@ -35,13 +36,26 @@ export class NativeHost {
     module: UIModule, private readonly load: UILoader = loadNativeUI,
     readonly enhanced?: EnhancedPasteController, readonly clipboardInput?: ClipboardInput) {
     validate(module);
+    // SDK node handlers consume pointer events before the host's input loop.
+    // Observe genuine user events at that dispatch boundary, never synthetic bridge polls.
+    if (typeof surface.dispatch === 'function') {
+      const dispatch = surface.dispatch.bind(surface);
+      surface.dispatch = event => {
+        const handler = dispatch(event);
+        const userEvent = ['focus', 'edit', 'undo', 'toggle', 'select', 'activate', 'change'].includes(event.ev)
+          || (event.ev === 'action' && event.id !== 'dock.sessions');
+        if (!userEvent) return handler;
+        return async () => { this.current.noteInteraction(); await handler?.(); };
+      };
+    }
     this.current = new module.NativeUI(c, session, surface, enhanced, clipboardInput);
     this.current.reloadWindow = () => this.reload();
   }
 
   get openProject() { return this.current.openProject; }
   set openProject(value: NativeUI['openProject']) { this.current.openProject = value; }
-  openSession(id: string) { return this.current.openSession(id); }
+  // Project IPC can select a session without the user reading this window.
+  openSession(id: string) { return this.current.openSession(id, false); }
   newSession() { return this.current.newSession(); }
   openSidebar() { return this.current.openSidebar(); }
 

@@ -1,4 +1,5 @@
 /** @jsxImportSource @stencil-hq/tern */
+import { translate, type Language } from './i18n';
 import { html } from '@stencil-hq/tern';
 import { proposalDiff, type ProposalRun } from './proposals';
 
@@ -31,22 +32,23 @@ function paragraph(runs: ProposalRun[], side: 'before' | 'after') {
   </html.div>);
 }
 
-export function ProposalView({ before, after, number, checked, disabled, onSelect }: {
-  before: string; after: string; number: number; checked: boolean; disabled: boolean; onSelect: (checked: boolean) => void;
+export function ProposalView({ language, before, after, number, checked, disabled, onSelect }: {
+  language?: Language; before: string; after: string; number: number; checked: boolean; disabled: boolean; onSelect: (checked: boolean) => void;
 }) {
+  const t = (text: string) => translate(language, text);
   const diff = proposalDiff(before, after);
   return <html.div class="ct-proposal" role="ct.proposal">
     <html.label class="ct-proposal-choice">
-      <html.input type="checkbox" aria={`Select edit ${number}`} checked={checked} disabled={disabled}
+      <html.input type="checkbox" aria={t(`Select edit ${number}`)} checked={checked} disabled={disabled}
         onChange={event => onSelect(event.checked === true)} />
-      <html.span text={`Edit ${number}`} />
+      <html.span text={t(`Edit ${number}`)} />
     </html.label>
     <html.div role="ct.proposal.before" class="ct-proposal-side">
-      <html.div class="ct-proposal-label" text="Original" />
+      <html.div class="ct-proposal-label" text={t("Original")} />
       <html.div class="ct-proposal-prose">{paragraph(diff.before, 'before')}</html.div>
     </html.div>
     <html.div role="ct.proposal.after" class="ct-proposal-side">
-      <html.div class="ct-proposal-label" text="Suggested" />
+      <html.div class="ct-proposal-label" text={t("Suggested")} />
       <html.div class="ct-proposal-prose">{paragraph(diff.after, 'after')}</html.div>
     </html.div>
   </html.div>;

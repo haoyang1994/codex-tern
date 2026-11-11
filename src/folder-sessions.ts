@@ -12,9 +12,11 @@ export interface FolderSession {
   locked: boolean;
   running: boolean;
   waiting: boolean;
+  permission: boolean;
   completed: boolean;
   failed: boolean;
   canArchive: boolean;
+  pinned: boolean;
 }
 
 function activityAt(thread: Thread) {
@@ -25,6 +27,9 @@ function activityAt(thread: Thread) {
 export class FolderSessions {
   private cwd: string;
   private threads: Thread[] = [];
+  // Pins discovered beyond the visible pages must not advance normal pagination
+  // or leak into the unpinned list when their preference is removed.
+  private pinnedThreads: Thread[] = [];
   private cursor: string | null = null;
   private pages = 0;
   private generation = 0;
@@ -55,14 +60,20 @@ export class FolderSessions {
   private fingerprint() { return JSON.stringify([this.c.cwd, this.c.connection, this.c.sessionsVersion]); }
 
   private sort() { this.threads.sort((a, b) => activityAt(b) - activityAt(a)); }
+  private allThreads() {
+    const known = new Set(this.threads.map(t => t.id));
+    return [...this.threads, ...this.pinnedThreads.filter(t => this.c.isPinned(t.id) && !known.has(t.id))];
+  }
 
   private mergeLocal() {
-    this.threads = this.threads.map(thread => {
+    const merge = (thread: Thread) => {
       const local = this.c.sessionThread(thread.id);
       return local ? { ...thread, ...(local.name !== undefined ? { name: local.name } : {}),
         ...(local.preview ? { preview: local.preview } : {}),
         recencyAt: Math.max(activityAt(thread), activityAt(local)) } : thread;
-    });
+    };
+    this.threads = this.threads.map(merge);
+    this.pinnedThreads = this.pinnedThreads.map(merge);
     this.sort();
   }
 
@@ -81,7 +92,7 @@ export class FolderSessions {
     }
     if (this.cwd !== this.c.cwd) {
       this.cwd = this.c.cwd; this.generation++;
-      this.threads = []; this.cursor = null; this.pages = 0; this.loading = false; this.error = '';
+      this.threads = []; this.pinnedThreads = []; this.cursor = null; this.pages = 0; this.loading = false; this.error = '';
       this.locked.clear(); this.conflicts.clear();
     }
     this.rememberCurrent();
@@ -92,16 +103,20 @@ export class FolderSessions {
   };
 
   get snapshot() {
+    this.sort();
     const current = this.c.thread;
-    const rows: FolderSession[] = this.threads.filter(t => !t.ephemeral && !this.c.isArchived(t.id)
-      && (t.name?.trim() || t.preview?.trim() || this.c.sessionHasContent(t.id))).map(t => ({
+    const rows: FolderSession[] = this.allThreads().filter(t => !t.ephemeral && !this.c.isArchived(t.id)
+      && (t.name?.trim() || t.preview?.trim() || this.c.sessionHasContent(t.id)))
+      .sort((a, b) => Number(this.c.isPinned(b.id)) - Number(this.c.isPinned(a.id)) || activityAt(b) - activityAt(a)).map(t => ({
       id: t.id, title: (t.name || t.preview || 'New session').replace(/\s+/g, ' ').slice(0, 240),
       titleRevision: this.c.sessionTitleRevision(t.id),
       updatedAt: t.updatedAt,
       time: activityAt(t) ? this.timeFormat.format(new Date(activityAt(t) * 1000)) : '',
       locked: this.isLocked(t.id),
+      pinned: this.c.isPinned(t.id),
       canArchive: this.c.canArchiveSession(t.id) && !this.isLocked(t.id),
       ...this.c.sessionStatus(t.id),
+      permission: this.c.sessionNeedsPermission(t.id),
     }));
     return { version: 1, cwd: this.cwd, current: current?.id ?? '', rows,
       loading: this.loading, error: this.error, more: !!this.cursor,
@@ -110,8 +125,8 @@ export class FolderSessions {
       connected: this.c.connection === 'ready', connecting: this.c.connection === 'connecting' };
   }
 
-  contains(id: string) { return this.threads.some(t => t.id === id); }
-  get(id: string) { return this.threads.find(t => t.id === id); }
+  contains(id: string) { return this.allThreads().some(t => t.id === id); }
+  get(id: string) { return this.allThreads().find(t => t.id === id); }
   isLocked(id: string) {
     // Ownership may change after an asynchronous probe or a previous conflict.
     // Loaded background conversations must stay selectable, just like this one.
@@ -128,7 +143,7 @@ export class FolderSessions {
   refreshLocks(): Promise<void> {
     if (this.disposed) return Promise.resolve();
     const generation = this.generation;
-    const ids = this.threads.map(t => t.id);
+    const ids = this.allThreads().map(t => t.id);
     const key = JSON.stringify(ids);
     if (this.lockRequest?.generation === generation && this.lockRequest.ids === key) return this.lockRequest.promise;
     const promise = Promise.resolve().then(async () => {
@@ -181,26 +196,49 @@ export class FolderSessions {
         let cursor = more ? this.cursor : null;
         let count = 0;
         const pages = more ? 1 : Math.max(1, this.pages);
+        const inFolder = (t: Thread) => !t.ephemeral && !this.c.isArchived(t.id) && resolve(t.cwd) === resolve(cwd);
+        const listPage = (cursor: string | null) => this.c.rpc.request('thread/list', {
+          cwd, archived: false, limit: 30, sortKey: 'recency_at', sortDirection: 'desc',
+          ...(cursor ? { cursor } : {}),
+          ...(indexed ? { useStateDbOnly: true } : {}),
+        });
         do {
-          const page = await this.c.rpc.request('thread/list', {
-            cwd, limit: 30, sortKey: 'recency_at', sortDirection: 'desc',
-            ...(cursor ? { cursor } : {}),
-            ...(indexed ? { useStateDbOnly: true } : {}),
-          });
+          const page = await listPage(cursor);
           if (!current()) return;
-          rows.push(...page.data.filter((t: Thread) => !t.ephemeral && !this.c.isArchived(t.id) && resolve(t.cwd) === resolve(cwd)));
+          rows.push(...page.data.filter(inFolder));
           cursor = page.nextCursor ?? null; count++;
         } while (cursor && count < pages);
+        // Only the authoritative scan-and-repair read supplements pins. Keep
+        // its cursor separate: Load more must still start at the visible page.
+        let pinnedRows: Thread[] | undefined;
+        if (!indexed && !more) {
+          pinnedRows = [];
+          const wanted = new Set(this.c.preferences.pinned);
+          for (const row of rows) wanted.delete(row.id);
+          let pinCursor = cursor;
+          const visited = new Set<string>();
+          while (pinCursor && wanted.size) {
+            if (visited.has(pinCursor)) throw new Error('Session pagination repeated a cursor while finding pinned sessions.');
+            visited.add(pinCursor);
+            const page = await listPage(pinCursor);
+            if (!current()) return;
+            for (const row of page.data.filter(inFolder)) if (wanted.delete(row.id)) pinnedRows.push(row);
+            pinCursor = page.nextCursor ?? null;
+          }
+        }
         const incoming = new Map(rows.map(t => [t.id, t]));
         const known = new Set(this.threads.map(t => t.id));
         const retained = this.threads
-          .filter(t => !this.c.isArchived(t.id) && (more || cursor || incoming.has(t.id) || t.id === this.c.thread?.id))
+          .filter(t => !this.c.isArchived(t.id)
+            && (pinnedRows === undefined || !this.c.isPinned(t.id) || incoming.has(t.id))
+            && (more || cursor || incoming.has(t.id) || t.id === this.c.thread?.id))
           .map(t => incoming.get(t.id) ?? t);
         const added = [...incoming.values()].filter(t => !known.has(t.id));
         // Refresh follows backend activity order, including its tie order.
         // Pagination keeps earlier pages and merges duplicates before sorting.
         this.threads = more ? [...retained, ...added]
           : [...incoming.values(), ...retained.filter(t => !incoming.has(t.id))];
+        if (pinnedRows !== undefined) this.pinnedThreads = pinnedRows;
         this.mergeLocal();
         this.cursor = cursor; this.pages = more ? this.pages + count : count;
         await this.refreshLocks();
@@ -232,7 +270,7 @@ export class FolderSessions {
   dispose() { this.disposed = true; this.generation++; this.c.off('change', this.observe); }
 
   reloadState() {
-    return { cwd: this.cwd, threads: this.threads, cursor: this.cursor, pages: this.pages,
+    return { cwd: this.cwd, threads: this.threads, pinnedThreads: this.pinnedThreads, cursor: this.cursor, pages: this.pages,
       visible: this.visible, locked: this.locked, conflicts: this.conflicts, error: this.error };
   }
   restoreReloadState(state: ReturnType<FolderSessions['reloadState']>) {

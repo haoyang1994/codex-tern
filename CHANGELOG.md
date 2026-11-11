@@ -2,6 +2,21 @@
 
 Notable changes, newest first. This log starts with the update below.
 
+## 2026-11-10
+
+### Added
+
+- Session rows show compact traffic lights: flashing cyan while working, yellow while waiting for input, slow red while waiting for permission, steady green for unread completion, and fast red for unread failure. Reduced Motion keeps active lamps steady.
+- Completion and failure lights clear only after interaction with that result's session and confirmation that its terminal result is visible. Background completion, returning to an old open pane, refresh and UI reload preserve unread results.
+- English and Simplified Chinese interfaces, slash commands, dynamic skill selection and pinned sessions. Typography follows Tern settings.
+- Native owners can connect loaded Codex conversations to the fixed Weixin Chief through the workbench's private relay, with directed messages, single-use approvals and question replies.
+
+### Fixed
+
+- Assistant progress and commentary stay outside collapsed command/tool blocks, preserving their chronological order.
+- Reserved Weixin Chief sessions cannot be resumed or modified by desktop clients; selected-session archiving skips them when choosing a replacement. Native RPC shutdown confirms that its owned process group has exited.
+- Ordinary Copy uses the native text selection; copying the complete Markdown or code/output is a separately named context-menu action.
+
 ## 2026-10-28
 
 ### Changed

@@ -1,14 +1,14 @@
 [data-role="codex-tern.sessions"], [data-role="codex-tern.toc"] {
   padding: 14px 8px;
   gap: 2px;
-  font-family: "Concourse T3", "LXGW Neo XiHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
-  font-size: 14px;
-  line-height: 22px;
+  font-family: var(--tv-font, var(--mono));
+  font-size: var(--sf-fs);
+  line-height: var(--sf-grid-lh);
 }
 [data-role="codex-tern.sessions.folder"] {
   padding: 2px 6px 12px;
   color: var(--t3);
-  font-size: 12px;
+  font-size: var(--sf-fs);
 }
 [data-role="codex-tern.sessions.new"] {
   padding: 6px;
@@ -34,15 +34,87 @@
 [data-role="codex-tern.sessions.item"][data-mark="pending"] { box-shadow: inset 0 0 0 1px var(--l2); }
 [data-role="codex-tern.sessions.item"][data-mark="locked"] { color: var(--t3); cursor: default; }
 [data-role="codex-tern.sessions.item"][data-mark="locked"]:hover { background: transparent; }
-[data-role="codex-tern.sessions.lock"],
-[data-role="codex-tern.sessions.waiting"],
-[data-role="codex-tern.sessions.running"] { width: 13px; height: 13px; flex-shrink: 0; color: var(--t3); }
+[data-role="codex-tern.sessions.lock"] { width: 13px; height: 13px; flex-shrink: 0; color: var(--t3); }
+/* One non-interactive traffic light per row. All inactive lamps stay dark gray;
+   Flash is a discrete on/off change (reference distinguishes flash from breathe).
+   Opacity changes only the small colored lens, never the row background. */
+.ct-session-traffic {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 36px; width: 36px; height: 14px; min-width: 36px;
+  box-sizing: border-box; padding: 3px; gap: 3px; border-radius: 7px;
+  background: #111517; pointer-events: none;
+}
+.ct-lamp {
+  display: block; position: relative; flex: 0 0 8px; width: 8px; height: 8px;
+  border-radius: 50%; background: #454b4e;
+}
+.ct-lamp-lit { position: absolute; inset: 0; border-radius: 50%; opacity: 0; }
+.ct-lamp-red > .ct-lamp-lit { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+.ct-lamp-yellow > .ct-lamp-lit { background: #f5c542; box-shadow: 0 0 4px #f5c542; }
+.ct-lamp-green > .ct-lamp-lit { background: #35c76f; box-shadow: 0 0 4px #35c76f; }
+.ct-session-working .ct-lamp-green > .ct-lamp-lit { background: #00c8ff; box-shadow: 0 0 4px #00c8ff; animation: ct-traffic-flash 1s steps(1, end) infinite; }
+.ct-session-waiting .ct-lamp-yellow > .ct-lamp-lit,
+.ct-session-permission .ct-lamp-red > .ct-lamp-lit { animation: ct-traffic-flash 1.5s steps(1, end) infinite; }
+.ct-session-failed .ct-lamp-red > .ct-lamp-lit { animation: ct-traffic-flash .65s steps(1, end) infinite; }
+.ct-session-completed .ct-lamp-green > .ct-lamp-lit { opacity: 1; }
+@keyframes ct-traffic-flash {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ct-session-working .ct-lamp-green > .ct-lamp-lit,
+  .ct-session-waiting .ct-lamp-yellow > .ct-lamp-lit,
+  .ct-session-permission .ct-lamp-red > .ct-lamp-lit,
+  .ct-session-failed .ct-lamp-red > .ct-lamp-lit { animation: none; opacity: 1; }
+}
+.sf.sf-el[data-role="codex-tern.sessions.archive"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--t3);
+  cursor: pointer;
+}
+.sf.sf-el[data-role="codex-tern.sessions.archive"]:hover { background: var(--l2); color: var(--t1); }
+.sf.sf-el[data-role="codex-tern.sessions.archive"][data-mark="disabled"] { opacity: 0.35; cursor: default; }
+.sf.sf-el[data-role="codex-tern.sessions.archive"] .sf-icon { width: 12px; height: 12px; }
+.sf.sf-el[data-role="codex-tern.sessions.pin"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--t3);
+  cursor: pointer;
+}
+.sf.sf-el[data-role="codex-tern.sessions.pin"]:hover { background: var(--l2); color: var(--t1); }
+.sf.sf-el[data-role="codex-tern.sessions.pin"][data-mark="disabled"] { opacity: 0.35; cursor: default; }
+.sf.sf-el[data-role="codex-tern.sessions.pin"] .sf-icon { width: 12px; height: 12px; }
+.sf.sf-el[data-role="codex-tern.sessions.pin"][data-mark="pinned"] { color: var(--accent); }
 [data-role="codex-tern.sessions.title"] {
   min-width: 0;
-  height: 22px;
+  min-height: var(--sf-grid-lh);
+  height: auto;
   overflow: hidden;
-  font-size: 14px;
-  line-height: 22px;
+  font-size: var(--sf-fs);
+  line-height: var(--sf-grid-lh);
 }
 [data-role="codex-tern.sessions.reveal"] {
   position: relative;
@@ -84,19 +156,15 @@
   [data-role="codex-tern.sessions.reveal"][data-mark="reveal"] > [data-role="codex-tern.sessions.label"],
   [data-role="codex-tern.sessions.reveal"][data-mark="reveal"]::after { animation: none; }
 }
-[data-role="codex-tern.sessions.completed"],
-[data-role="codex-tern.sessions.failed"] { width: 13px; height: 13px; flex-shrink: 0; }
-[data-role="codex-tern.sessions.completed"] { color: var(--accent); }
-[data-role="codex-tern.sessions.failed"] { color: var(--bad); }
-[data-role="codex-tern.sessions.note"] { padding: 8px; font-size: 12px; }
+[data-role="codex-tern.sessions.note"] { padding: 8px; font-size: var(--sf-fs); }
 
 /* The TOC is a separate native canvas. Tern owns its frame and scrolling. */
 [data-role="codex-tern.toc"] {
   gap: 2px;
 }
-[data-role="codex-tern.toc.head"] { padding: 2px 6px 12px; color: var(--t3); font-size: 12px; }
+[data-role="codex-tern.toc.head"] { padding: 2px 6px 12px; color: var(--t3); font-size: var(--sf-fs); }
 [data-role="codex-tern.toc.head"] > .sf-icon { width: 14px; height: 14px; color: var(--t3); }
-[data-role="codex-tern.toc.status"] { font-size: 12px; color: var(--t3); }
+[data-role="codex-tern.toc.status"] { font-size: var(--sf-fs); color: var(--t3); }
 [data-role="codex-tern.toc.body"] { gap: 2px; }
 [data-role="codex-tern.toc.topic"], [data-role="codex-tern.toc.child"] {
   min-width: 0; gap: 6px; cursor: pointer;
@@ -106,12 +174,12 @@
 [data-role="codex-tern.toc.link"] { min-width: 0; cursor: pointer; }
 [data-role="codex-tern.toc.label"] { min-width: 0; max-width: 100%; }
 [data-role="codex-tern.toc.visits"] {
-  flex-shrink: 0; color: var(--t3); font-size: 12px; line-height: 22px; cursor: pointer;
+  flex-shrink: 0; color: var(--t3); font-size: var(--sf-fs); line-height: var(--sf-grid-lh); cursor: pointer;
   padding: 0 4px; border-radius: 7px;
 }
 [data-role="codex-tern.toc.visits"]:hover { background: var(--raise); }
 [data-role="codex-tern.toc.footer"] { gap: 6px; }
-[data-role="codex-tern.toc.note"] { padding: 8px; color: var(--t3); font-size: 12px; }
+[data-role="codex-tern.toc.note"] { padding: 8px; color: var(--t3); font-size: var(--sf-fs); }
 [data-role="codex-tern.toc.get"] {
   align-self: flex-start; padding: 6px; border-radius: 7px; cursor: pointer;
 }

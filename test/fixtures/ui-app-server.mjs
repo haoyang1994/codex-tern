@@ -83,7 +83,8 @@ createInterface({ input: process.stdin }).on('line', async line => {
   if (process.env.QA_RPC_LOG) appendFileSync(process.env.QA_RPC_LOG,
     JSON.stringify({ pid: process.pid, method: m.method ?? 'response', threadId: m.params?.threadId,
       ephemeral: m.params?.ephemeral, source: m.params?.threadSource, cursor: m.params?.cursor, name: m.params?.name,
-      useStateDbOnly: m.params?.useStateDbOnly }) + '\n');
+      useStateDbOnly: m.params?.useStateDbOnly,
+      ...(process.env.QA_FEATURE_FIXTURES ? { input: m.params?.input, cwds: m.params?.cwds, forceReload: m.params?.forceReload } : {}) }) + '\n');
   const gates = process.env.QA_STARTUP_RELEASE_DIR;
   const gate = m.method === 'account/read' ? 'account'
     : ['thread/start', 'thread/resume'].includes(m.method) ? 'session'
@@ -106,6 +107,10 @@ createInterface({ input: process.stdin }).on('line', async line => {
     case 'initialized': break;
     case 'account/read': reply({ account: { type: 'test' } }); break;
     case 'model/list': reply({ data: [model('qa-model'), model('other-model')], nextCursor: null }); break;
+    case 'skills/list': {
+      const skills = process.env.QA_SKILLS_FILE ? JSON.parse(readFileSync(process.env.QA_SKILLS_FILE, 'utf8')) : [];
+      reply({ data: (m.params.cwds ?? [process.cwd()]).map(cwd => ({ cwd, skills, errors: [] })) }); break;
+    }
     case 'config/read': reply({ config: {}, origins: {}, layers: null }); break;
     case 'thread/start': {
       if (m.params.ephemeral && !(m.params.threadSource === 'thread_outline' ? process.env.QA_TOC_FIXTURE : process.env.QA_GENERATED_TITLE)) {
@@ -189,7 +194,12 @@ createInterface({ input: process.stdin }).on('line', async line => {
       reply({ data: sorted.slice(start, start + limit), nextCursor: start + limit < sorted.length ? String(start + limit) : null }); break;
     }
     case 'thread/read': reply({ thread: threads.get(m.params.threadId) }); break;
-    case 'thread/unsubscribe': reply({}); notify('thread/closed', { threadId: m.params.threadId }); break;
+    case 'thread/unsubscribe': {
+      const subscribed = owned.has(m.params.threadId);
+      owned.get(m.params.threadId)?.release(); owned.delete(m.params.threadId);
+      reply({ status: subscribed ? 'unsubscribed' : 'notSubscribed' });
+      notify('thread/closed', { threadId: m.params.threadId }); break;
+    }
     case 'turn/start': {
       const text = m.params.input.filter(i => i.type === 'text').map(i => i.text).join('');
       if (text.includes('QA_DELAYED_REJECT')) {
@@ -250,6 +260,49 @@ createInterface({ input: process.stdin }).on('line', async line => {
         send({ id: requestId, method: question ? 'item/tool/requestUserInput' : 'item/commandExecution/requestApproval',
           params: { threadId: current.id, turnId: turn.id, itemId: 'approval-item', command: 'echo QA_APPROVAL', cwd: process.cwd(),
             ...(question ? { questions: [{ id: 'color', header: 'Color', question: 'Choose a color', options: [{ label: 'Blue', description: 'Use blue' }, { label: 'Orange', description: 'Use orange' }], isOther: true }] } : {}) } });
+        if (text.includes('QA_TYPED_REQUESTS')) {
+          pending.set(String(requestId), context);
+          send({ id: String(requestId), method: 'item/commandExecution/requestApproval', params: {
+            threadId: current.id, turnId: turn.id, itemId: 'string-approval', command: 'echo QA_STRING_ID', cwd: process.cwd(),
+          } });
+        }
+      } else if (text.includes('QA_COMMENTARY_FIXTURE')) {
+        const commentary = '收到，普通对话和任务完成通知两条链路都需要查。服务虽然显示在线，但你已经确认收不到消息，所以不能据此说功能可用。我会逐项核对完成事件、发送队列和微信接口回执，查清漏在哪里。';
+        const command = n => add({ id: `commentary-command-${n}`, type: 'commandExecution', command: `echo QA_COMMENTARY_COMMAND_${n}`, cwd: process.cwd(), status: 'completed', exitCode: 0, aggregatedOutput: `QA_COMMENTARY_OUTPUT_${n}` });
+        command(1);
+        const prefix = '收到，普通对话和任务完成通知两条链路';
+        add({ id: 'real-commentary', type: 'agentMessage', phase: 'commentary', text: prefix }, false);
+        event('item/agentMessage/delta', { itemId: 'real-commentary', delta: commentary.slice(prefix.length) });
+        const done = () => {
+          add({ id: 'real-commentary', type: 'agentMessage', phase: 'commentary', text: commentary });
+          for (let n = 2; n <= 6; n++) command(n);
+          add({ id: 'private-reasoning', type: 'reasoning', summary: [], content: ['QA_RAW_REASONING_MUST_STAY_HIDDEN'] });
+          finish('QA_COMMENTARY_FINAL：这是隔离协议测试，未访问微信或真实业务会话。');
+        };
+        if (process.env.QA_PROGRESS_RELEASE_FILE) {
+          const timer = setInterval(() => { if (existsSync(process.env.QA_PROGRESS_RELEASE_FILE)) { clearInterval(timer); done(); } }, 25);
+        } else setTimeout(done, 1500);
+      } else if (text.includes('QA_PROGRESS_FIXTURE')) {
+        add({ id: 'progress-one', type: 'agentMessage', phase: 'commentary', text: 'QA_PROGRESS_1 进度1：读取配置。' });
+        add({ id: 'progress-command-one', type: 'commandExecution', command: 'echo QA_COMMAND_ONE', cwd: process.cwd(), status: 'completed', exitCode: 0, aggregatedOutput: 'QA_TOOL_OUTPUT_ONE' });
+        add({ id: 'public-summary', type: 'reasoning', summary: [], content: ['QA_HIDDEN_REASONING'] }, false);
+        event('item/reasoning/summaryTextDelta', { itemId: 'public-summary', summaryIndex: 0, delta: 'QA_PUBLIC_SUMMARY 进度摘要：配置已读取。' });
+        add({ id: 'public-summary', type: 'reasoning', summary: ['QA_PUBLIC_SUMMARY 进度摘要：配置已读取。'], content: ['QA_HIDDEN_REASONING'] });
+        add({ id: 'progress-two', type: 'agentMessage', phase: 'commentary', text: 'QA_PROGRESS_2 进度2：' }, false);
+        event('item/agentMessage/delta', { itemId: 'progress-two', delta: '正在核对。' });
+        const done = () => {
+          add({ id: 'progress-two', type: 'agentMessage', phase: 'commentary', text: 'QA_PROGRESS_2 进度2：核对完成。' });
+          add({ id: 'progress-command-two', type: 'commandExecution', command: 'echo QA_COMMAND_TWO', cwd: process.cwd(), status: 'completed', exitCode: 0, aggregatedOutput: 'QA_TOOL_OUTPUT_TWO' });
+          add({ id: 'public-plan', type: 'plan', text: 'QA_PLAN 计划进度：已完成两步。' });
+          finish('QA_FINAL 最终答复：检查完成。');
+        };
+        if (process.env.QA_PROGRESS_RELEASE_FILE) {
+          const timer = setInterval(() => { if (existsSync(process.env.QA_PROGRESS_RELEASE_FILE)) { clearInterval(timer); done(); } }, 25);
+        } else setTimeout(done, 1500);
+      } else if (text.includes('QA_COPY_FIXTURE')) {
+        setTimeout(() => finish('Alpha SELECTME Omega\n\nSecond paragraph.'), 100);
+      } else if (text.includes('QA_STATUS_FAIL')) {
+        setTimeout(() => finish('QA_STATUS_FAILED_RESULT', 'failed'), 350);
       } else if (text.includes('background')) {
         setTimeout(() => finish('QA_BACKGROUND_DONE'), 1500);
       } else if (text.includes('edit fixture')) {

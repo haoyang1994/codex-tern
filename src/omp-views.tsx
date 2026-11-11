@@ -1,4 +1,5 @@
 /** @jsxImportSource @stencil-hq/tern */
+import { translate, type Language } from './i18n';
 /**
  * Native node layouts adapted from can1357/oh-my-pi (MIT).
  * See THIRD_PARTY_NOTICES.md. The omp.* roles select Tern's built-in skin;
@@ -6,13 +7,14 @@
  */
 import type { Children } from '@stencil-hq/tern';
 
-export function Welcome() {
+export function Welcome({ language }: { language?: Language } = {}) {
+  const t = (text: string) => translate(language, text);
   return <col key="welcome" role="omp.welcome" gap="sm">
     <row key="lockup" role="ct.welcome.lockup" gap="sm" align="center">
       <icon key="logo" name="app-codex" role="ct.logo" />
-      <text key="wordmark" role="ct.welcome.wordmark" wrap="none">codex</text>
+      <text key="wordmark" role="ct.welcome.wordmark" wrap="none">{t("codex")}</text>
     </row>
-    <text key="tip" role="ct.welcome.prompt">What would you like to work on?</text>
+    <text key="tip" role="ct.welcome.prompt">{t("What would you like to work on?")}</text>
   </col>;
 }
 
@@ -21,13 +23,14 @@ export function ComposerFrame(props: { running: boolean; children: Children }) {
 }
 
 /** Same native working row as OMP's loader. Tern clocks the motion and timer. */
-export function WorkingRow(props: { turnKey: string; age: number; reduceMotion: boolean }) {
+export function WorkingRow(props: { turnKey: string; age: number; reduceMotion: boolean; language?: Language }) {
+  const t = (text: string) => translate(props.language, text);
   return <row key={`working-${props.turnKey}`} role="omp.working" align="center" gap="sm">
     <spinner key="spinner" style="starburst" tone="accent" />
     <elapsed key="elapsed" age={props.age} format="short" />
     <text key="sep" role="omp.working.sep" text="·" />
-    {props.reduceMotion ? <text key="label" role="omp.working.label" tone="muted" text="Working…" />
-      : <shimmer key="label" role="omp.working.label" text="Working…" mode="classic"
+    {props.reduceMotion ? <text key="label" role="omp.working.label" tone="muted" text={t("Working…")} />
+      : <shimmer key="label" role="omp.working.label" text={t("Working…")} mode="classic"
         palette={{ low: 'dim', mid: 'muted', high: 'accent' }} />}
     <row key="fill" grow={1} />
   </row>;

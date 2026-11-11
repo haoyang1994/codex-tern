@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { findExecutable } from './launch';
-import { runPluginCommand } from './tern-plugin';
+import { runPluginCommand, ternControlArgs } from './tern-plugin';
 
 export type ReadingRequest = { token: string; lines: number; relative?: boolean; threadId?: string };
 type Anchor = { id: string; offset: number };
@@ -41,7 +41,7 @@ export async function inspectReadingFocus(role: string, client: string) {
   const assistant = `${main} > .sf > [data-role="omp.assistant"]`;
   const toc = `[data-role="codex-tern.toc"][data-mark=${quoted(client)}]`;
   try {
-    const { stdout } = await execAsync(tern, ['ctl', `tree .tv, .tv-grid, ${main}, ${main} > .sf, ${assistant} > .sf-md, ${assistant} > .ct-proposal, ${assistant} > .ct-proposal-actions, .sf-dock, ${toc} > [data-role="codex-tern.toc.body"], ${toc} [data-role="codex-tern.toc.label"], ${toc} > [data-role="codex-tern.toc.footer"]`],
+    const { stdout } = await execAsync(tern, ternControlArgs(`tree .tv, .tv-grid, ${main}, ${main} > .sf, ${assistant} > .sf-md, ${assistant} > .ct-proposal, ${assistant} > .ct-proposal-actions, .sf-dock, ${toc} > [data-role="codex-tern.toc.body"], ${toc} [data-role="codex-tern.toc.label"], ${toc} > [data-role="codex-tern.toc.footer"]`),
       { timeout: 750, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' });
     const reply = JSON.parse(stdout);
     if (reply.ok && Array.isArray(reply.nodes) && reply.nodes.every((n: Element) =>
@@ -91,6 +91,7 @@ export function readingFocus(nodes: readonly Element[]) {
   // The native list's max.lines scales with the font; geometry is already zoomed.
   const lines = toc && Math.max(1, Math.floor((toc.bottom - toc.body.rect[1]! - toc.footer - 14 * toc.line / 22) / toc.line));
   return { node: node && anchorId(node), lines, position,
+    fullyVisible: visible.filter(n => n.rect[1]! >= top && bottom(n) <= view!.bottom).map(n => anchorId(n)!),
     visible: visible.filter(n => bottom(n) > top && n.rect[1]! < view!.bottom).map(n => anchorId(n)!) };
 }
 
@@ -106,7 +107,7 @@ async function elements(selector: string): Promise<Element[] | undefined> {
   try {
     // Keep capture and selection in one input turn. Otherwise an edit arriving
     // during inspection could be applied to the conversation being left.
-    const stdout = execFileSync(tern, ['ctl', `tree ${selector}`], { timeout: 500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout = execFileSync(tern, ternControlArgs(`tree ${selector}`), { timeout: 500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const reply = JSON.parse(stdout);
     if (reply.ok && Array.isArray(reply.nodes) && reply.nodes.every((n: Element) =>
       Array.isArray(n.rect) && n.rect.length === 4 && n.rect.every(Number.isFinite))) return reply.nodes;

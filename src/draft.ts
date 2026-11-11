@@ -1,7 +1,9 @@
 import type { Key, EditorProps } from '@stencil-hq/tern';
 import { Editor } from '@oh-my-pi/pi-tui/components/editor';
 import { getEditorTheme } from '@oh-my-pi/pi-tui/theme/tui-adapters';
-import { CombinedAutocompleteProvider } from '@oh-my-pi/pi-tui/autocomplete';
+import { Completion } from './completion';
+import { skillNames, skillPrefix, type SkillInput, type Skills } from './skills';
+import type { Language } from './i18n';
 import type { DescribeContext, NativeNode } from '@oh-my-pi/pi-tui/native/node';
 
 interface Snapshot { text: string; cursor: number; anchor: number }
@@ -33,6 +35,9 @@ export class Draft {
   private selection: number | undefined;
   private redoStack: Snapshot[] = [];
   private cwd = '';
+  private language: Language = 'en';
+  private skills?: Skills;
+  selectedSkills: SkillInput[] = [];
   context = context;
 
   constructor() {
@@ -41,6 +46,12 @@ export class Draft {
     this.editor.onChange = () => {
       const text = this.text;
       if (text !== this.observedText) { this.observedText = text; this.revision++; }
+      this.selectedSkills = this.selectedSkills.filter(s => skillNames(text).includes(s.name));
+      const revision = this.revision, cursor = this.cursor;
+      if (this.skills && skillPrefix(text.slice(0, cursor)) && !this.editor.isAutocompleteActive())
+        queueMicrotask(() => {
+          if (this.revision === revision && this.cursor === cursor && !this.editor.isAutocompleteActive()) this.editor.handleInput('\t');
+        });
       this.onUpdate?.();
     };
     this.editor.onAutocompleteUpdate = () => this.onUpdate?.();
@@ -60,10 +71,16 @@ export class Draft {
   get completing() { return this.editor.isShowingAutocomplete(); }
   get vim() { return this.editor.vimEnabled; }
   setVim(enabled: boolean) { this.editor.setVimMode(enabled); this.selection = undefined; this.onUpdate?.(); }
-  setWorkspace(cwd: string) {
-    if (cwd === this.cwd) return;
+  setWorkspace(cwd: string, skills?: Skills, language: Language = 'en') {
+    if (cwd === this.cwd && skills === this.skills && language === this.language) return;
+    if (this.cwd && cwd !== this.cwd) this.selectedSkills = [];
     this.cwd = cwd;
-    this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], cwd));
+    this.skills = skills; this.language = language;
+    this.editor.setAutocompleteProvider(new Completion(cwd, language, skills, skill => this.selectSkill(skill)));
+  }
+  selectSkill(skill: SkillInput) {
+    this.selectedSkills = [...this.selectedSkills.filter(s => s.name !== skill.name), { ...skill }];
+    this.onUpdate?.();
   }
   describe(): NativeNode { return this.editor.describe(this.context); }
   get nativeProps(): EditorProps {

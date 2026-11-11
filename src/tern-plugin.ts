@@ -5,6 +5,11 @@ import { findExecutable } from './launch';
 
 const exec = promisify(execFile);
 
+/** An explicit endpoint lets isolated offscreen clients keep all inspection local. */
+export function ternControlArgs(command: string) {
+  return ['ctl', ...(process.env.CODEX_TERN_CONTROL ? ['--control', process.env.CODEX_TERN_CONTROL] : []), command];
+}
+
 export async function runPluginCommand(command: 'setup' | 'sessions' | 'reload' | 'reading-position') {
   const tern = findExecutable('tern');
   if (!tern) throw new Error('Tern was not found on PATH.');
@@ -15,7 +20,7 @@ export async function runPluginCommand(command: 'setup' | 'sessions' | 'reload' 
     console.log('Installed the Tern commands: Codex: Sessions, Codex: Session TOC and Codex: Reload Window');
   } else {
     try {
-      const result = await exec(tern, ['ctl', `plugins run plugin.codex-tern.${command}`], { timeout: 15_000 });
+      const result = await exec(tern, ternControlArgs(`plugins run plugin.codex-tern.${command}`), { timeout: 15_000 });
       const reply = JSON.parse(result.stdout);
       if (!reply.ok) throw new Error(reply.error ?? 'Tern could not run the Codex window command.');
     } catch (error) {
