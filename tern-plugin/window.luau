@@ -425,6 +425,10 @@ local function restore(cx)
   poll()
 end
 
+local function sidebar_target(pane)
+  return (panels[pane] and panels[pane].target) or outline.target(pane)
+end
+
 -- While a sidebar card has focus for that moment, label its tab with the
 -- conversation's title instead of "Sessions" so the tab does not flicker.
 -- Tabs without a Codex sidebar keep Tern's default label (nil).

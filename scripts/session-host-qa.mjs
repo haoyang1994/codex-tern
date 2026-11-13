@@ -247,7 +247,7 @@ try {
   assert.equal(migrated.identity.focused, evidence.ids.client);
   evidence.passed.push('Existing window-only sessions canvas migrates in place to one host block, removes the legacy pane and preserves client focus');
   captureOwned();
-  assert(!/exceeded \d+ ms|panicked|hook failed|cannot load|failed to (?:load|compile)/i.test(readFileSync(out + '/tern.log','utf8')));
+  assert(!/exceeded \d+ ms|panicked|plugin handler failed|hook failed|cannot load|failed to (?:load|compile)/i.test(readFileSync(out + '/tern.log','utf8')));
 } catch (e) {
   failure = e; evidence.errors.push(e.stack ?? String(e));
 } finally {
