@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { SkillInput } from './skills';
+import type { TurnUsage } from './turn-usage';
 
 export interface SavedInput extends SavedDraft { id: string }
 export interface SavedDraft { text: string; images: string[]; skills?: SkillInput[] }
@@ -10,6 +11,7 @@ export interface PendingForkTitle { name: string | null; turnId: string }
 export interface SavedSession {
   id: string; cwd: string; name?: string; preview?: string;
   pendingForkTitle?: PendingForkTitle;
+  turnUsage?: Record<string, TurnUsage>;
   draft: SavedDraft; queue: SavedInput[]; unconfirmed: SavedInput[]; inflight?: SavedInput;
 }
 interface RecoveryData { version: 1; selected?: string; notifications: boolean; sessions: SavedSession[] }
@@ -35,6 +37,9 @@ function validate(value: unknown): asserts value is RecoveryData {
       && (s.pendingForkTitle === undefined || (object(s.pendingForkTitle)
         && (s.pendingForkTitle.name === null || typeof s.pendingForkTitle.name === 'string')
         && typeof s.pendingForkTitle.turnId === 'string'))
+      && (s.turnUsage === undefined || (object(s.turnUsage) && Object.values(s.turnUsage).every((u: unknown) => object(u)
+        && Number.isSafeInteger(u.input) && u.input >= 0 && Number.isSafeInteger(u.cached) && u.cached >= 0 && u.cached <= u.input
+        && (u.output === undefined || (Number.isSafeInteger(u.output) && u.output >= 0)))))
       && draft(s.draft) && Array.isArray(s.queue) && s.queue.every(input)
       && Array.isArray(s.unconfirmed) && s.unconfirmed.every(input) && (s.inflight === undefined || input(s.inflight))))
     throw new Error('Unrecognized recovery file. The original file was left intact.');

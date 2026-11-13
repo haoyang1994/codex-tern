@@ -38,6 +38,9 @@ test('UI catalog preserves English and unknown text, and interpolates values wit
   assert.equal(translate('en', 'New session'), 'New session');
   assert.equal(translate('zh-CN', 'New session'), '新建会话');
   assert.equal(translate('zh-CN', 'Archive session'), '归档会话');
+  assert.equal(translate('zh-CN', '2 queued'), '2 条待发送');
+  assert.equal(translate('zh-CN', 'Remove queued message'), '移除排队消息');
+  assert.equal(translate('zh-CN', 'Switch to Untitled'), '切换到 Untitled');
   assert.equal(translate('zh-CN', 'Directory: /tmp/New session'), '目录：/tmp/New session');
   assert.equal(translate('zh-CN', 'Your answer: Working…'), '你的回答：Working…');
   assert.equal(translate('zh-CN', 'custom user text 中文'), 'custom user text 中文');

@@ -74,6 +74,7 @@ function finish(text, status = 'completed') {
   if (command) add({ ...command, status: status === 'completed' ? 'completed' : 'failed', exitCode: status === 'completed' ? 0 : 130 });
   if (text) add({ id: `answer-${turn.id}`, type: 'agentMessage', phase: 'final_answer', text });
   turn.status = status; turn.completedAt = Date.now() / 1000; turn.durationMs = Math.round((turn.completedAt - turn.startedAt) * 1000);
+  if (turn.items.some(item => item.type === 'userMessage' && item.content?.some(input => input.text?.includes('QA_CONTEXT_NOTIFY')))) turn.durationMs = 4000;
   current.recencyAt = current.updatedAt = turn.completedAt;
   persist();
   event('turn/completed', { turn });
@@ -98,6 +99,12 @@ createInterface({ input: process.stdin }).on('line', async line => {
       local.run(context, () => finish(`QA_RESPONSE_${m.result.decision ?? (m.result.answers ? 'answered' : m.result.action)}`));
     }
     return;
+  }
+  if (historyFile && existsSync(historyFile) && ['thread/list','thread/read','thread/turns/list','thread/items/list','thread/resume'].includes(m.method)) {
+    const saved = JSON.parse(readFileSync(historyFile,'utf8'));
+    const ids = new Set(saved.threads.map(t => t.id));
+    for (const id of threads.keys()) if (!owned.has(id) && !ids.has(id)) threads.delete(id);
+    for (const thread of saved.threads) if (!owned.has(thread.id)) threads.set(thread.id,thread);
   }
   const context = contexts.get(m.params?.threadId) ?? { current: threads.get(m.params?.threadId) };
   local.run(context, () => {
@@ -158,7 +165,8 @@ createInterface({ input: process.stdin }).on('line', async line => {
         .sort((a, b) => activity(b) - activity(a));
       const at = Number(m.params.cursor ?? 0), limit = Math.min(m.params.limit ?? 30, process.env.QA_SESSION_FIXTURES ? 4 : 30);
       const data = rows.slice(at, at + limit).map(t => gates && m.params.useStateDbOnly && t.id === 'saved-2'
-        ? { ...t, name: 'Cached session 2' } : t);
+        ? { ...t, name: 'Cached session 2' } : t).map(t => process.env.QA_FORK_METADATA
+          ? { ...t, sessionId: t.id, forkedFromId: null } : t);
       reply({ data, nextCursor: at + limit < rows.length ? String(at + limit) : null }); break;
     }
     case 'thread/archive': {
@@ -188,10 +196,25 @@ createInterface({ input: process.stdin }).on('line', async line => {
       else reply(settings(current));
       break;
     case 'thread/turns/list': {
-      const sorted = [...current.turns].reverse();
-      const start = process.env.QA_TOC_FIXTURE ? Number(m.params.cursor ?? 0) : 0;
-      const limit = process.env.QA_TOC_FIXTURE ? m.params.limit ?? 15 : sorted.length;
+      const target = threads.get(m.params.threadId);
+      if (!target) { send({ id: m.id,error: { code: -32000,message: 'Session not found' } }); break; }
+      const sorted = m.params.sortDirection==='asc' ? [...target.turns] : [...target.turns].reverse();
+      const paginated = process.env.QA_TOC_FIXTURE || process.env.QA_TREE_FIXTURE;
+      const start = paginated ? Number(m.params.cursor ?? 0) : 0;
+      const limit = paginated ? m.params.limit ?? 15 : sorted.length;
       reply({ data: sorted.slice(start, start + limit), nextCursor: start + limit < sorted.length ? String(start + limit) : null }); break;
+    }
+    case 'thread/items/list': {
+      const target = threads.get(m.params.threadId), descending = m.params.sortDirection==='desc';
+      if (!target || target.archived) { send({ id: m.id,error: { code: -32000,message: 'Session not found' } }); break; }
+      const items = target.turns.filter(t => !m.params.turnId || t.id===m.params.turnId).flatMap(t => t.items.map(item => ({ turnId: t.id,item,startedAtMs: null,completedAtMs: null })));
+      const cursor = m.params.cursor;
+      const anchor = typeof cursor==='object' && cursor ? items.findIndex(e => e.item.id===cursor.itemId) : cursor ? Number(cursor) : descending ? items.length : -1;
+      const indexes = items.map((_,i) => i).filter(i => descending ? i<anchor : i>anchor);
+      if (descending) indexes.reverse();
+      const selected = indexes.slice(0,m.params.limit ?? 50);
+      reply({ data: selected.map(i => items[i]),nextCursor: indexes.length>selected.length ? String(selected.at(-1)) : null,
+        backwardsCursor: selected.length ? String(selected[0]) : null }); break;
     }
     case 'thread/read': reply({ thread: threads.get(m.params.threadId) }); break;
     case 'thread/unsubscribe': {
@@ -270,6 +293,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
         const used = text.includes('COMPACT') ? 24000 : 48200;
         const usage = { totalTokens: used, inputTokens: used - 200, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 200, reasoningOutputTokens: 100 };
         event('thread/tokenUsage/updated', { tokenUsage: { last: usage, total: { ...usage, totalTokens: 900000 }, modelContextWindow: 200000 } });
+        if (text.includes('NOTIFY')) event('warning', { message: 'QA_NOTICE' });
         finish('QA_CONTEXT_FINAL: Native usage fixture.');
       } else if (text.includes('QA_COMMENTARY_FIXTURE')) {
         const commentary = '收到，普通对话和任务完成通知两条链路都需要查。服务虽然显示在线，但你已经确认收不到消息，所以不能据此说功能可用。我会逐项核对完成事件、发送队列和微信接口回执，查清漏在哪里。';

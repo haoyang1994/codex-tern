@@ -1,3 +1,4 @@
+import { reservationProbe } from './weixin-chief-guard';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
@@ -15,6 +16,7 @@ import { SessionOutlines } from './session-outlines';
 import { outlineTurns } from './session-outline';
 import { Preferences } from './preferences';
 import { Skills, skillNames, type SkillInput } from './skills';
+import { PromptTreeService } from './prompt-tree-service';
 export type { DisplayItem, PendingRequest, QueuedInput, Notice } from './conversation';
 export interface Completion { threadId: string; turnId: string; title: string; status: 'completed' | 'failed' }
 
@@ -41,9 +43,11 @@ export class Controller extends EventEmitter {
   private readonly nameWrites = new Map<string, Promise<void>>();
   notifications = true;
   readonly skills: Skills;
+  readonly promptTree: PromptTreeService;
 
   constructor(readonly rpc: CodexRpc, cwd: string, readonly preferences = new Preferences()) {
     super();
+    this.promptTree = new PromptTreeService(rpc.options);
     this.skills = new Skills(rpc, () => this.cwd, () => this.changed());
     rpc.on('notification', (message: RpcMessage) => {
       if (['thread/settings/updated', 'thread/goal/updated', 'thread/goal/cleared', 'thread/reverted'].includes(message.method ?? '')) this.ownerEpoch++;
@@ -65,6 +69,9 @@ export class Controller extends EventEmitter {
       const target = id ? this.conversation(id) : this.selected;
       if (target && message.method === 'thread/closed') target.hydrated = false;
       target?.onNotification(message);
+      if (id && (['turn/completed', 'thread/started', 'thread/archived', 'thread/deleted'].includes(message.method ?? '')
+        || (message.method === 'item/completed' && message.params.item.type === 'userMessage')))
+        this.promptTree.invalidate(id);
     });
     rpc.on('request', (message: RpcMessage) => {
       const id = message.params?.threadId;
@@ -80,6 +87,7 @@ export class Controller extends EventEmitter {
       this.cancelTitles();
       this.outlines?.cancelAll();
       for (const conversation of this.all()) {
+        conversation.turnUsage.disconnect();
         conversation.connection = 'disconnected'; conversation.activeTurn = null;
         conversation.hydrated = false;
         conversation.invalidateRequests(); conversation.queuePaused = true; conversation.notice(text, true);
@@ -113,7 +121,7 @@ export class Controller extends EventEmitter {
       && !conversation?.requests.length && !conversation?.queue.length
       && !conversation?.unconfirmed.length && !conversation?.inflight;
   }
-  private async prepareSession(id: string, recoverEmpty = false) {
+  private async prepareSession(id: string, recoverEmpty = false, refreshOutline = true) {
     const next = this.conversation(id);
     if (!next.hydrated) {
       try { await next.resume(id); }
@@ -132,7 +140,7 @@ export class Controller extends EventEmitter {
       }
       next.hydrated = true;
       await this.outlines?.load(id);
-      void this.outlines?.resume(id, this.auxiliaryModel(next), outlineTurns(next.items, next.turns));
+      if (refreshOutline) void this.outlines?.resume(id, this.auxiliaryModel(next), outlineTurns(next.items, next.turns));
     }
     return next;
   }
@@ -248,6 +256,16 @@ export class Controller extends EventEmitter {
   get diagnostics() { return [...this.globalDiagnostics, ...this.selected.diagnostics].slice(-30); }
   get endedTurns() { return this.selected.endedTurns; }
   get turns() { return this.selected.turns; }
+  get turnMetricsSnapshot() {
+    const tracker = this.selected.turnUsage;
+    const current = this.activeTurn;
+    if (current) {
+      const started = this.turns.get(current)?.startedAt;
+      return { usage: tracker.current(current), durationMs: typeof started === 'number' ? Date.now() - started * 1000 : null };
+    }
+    const last = [...tracker.completed.entries()].at(-1);
+    return last ? { usage: last[1], durationMs: this.turns.get(last[0])?.durationMs } : undefined;
+  }
   get model() { return this.selected.model; }
   get effort() { return this.selected.effort; }
   get operation() { return this.navigation || this.selected.operation; }
@@ -337,6 +355,7 @@ export class Controller extends EventEmitter {
       conversation.cwd = saved.cwd;
       conversation.thread = { id: saved.id, cwd: saved.cwd, name: saved.name, preview: saved.preview } as Thread;
       conversation.pendingForkTitle = saved.pendingForkTitle && { ...saved.pendingForkTitle };
+      for (const [id, usage] of Object.entries(saved.turnUsage ?? {})) conversation.turnUsage.completed.set(id, usage);
       conversation.queue = structuredClone(saved.queue.filter(q => q.id !== saved.inflight?.id));
       conversation.unconfirmed = structuredClone([...new Map([...saved.unconfirmed,
         ...(saved.inflight ? [saved.inflight] : [])].map(q => [q.id, q])).values()]);
@@ -349,6 +368,7 @@ export class Controller extends EventEmitter {
     if (!this.recovery || !thread || this.isArchived(thread.id)) return;
     this.recovery.update({ id: thread.id, cwd: conversation.cwd, name: thread.name ?? undefined, preview: thread.preview,
       pendingForkTitle: conversation.pendingForkTitle,
+      turnUsage: Object.fromEntries(conversation.turnUsage.completed),
       draft: this.recovery.session(thread.id)?.draft ?? { text: '', images: [] },
       queue: conversation.queue, unconfirmed: conversation.unconfirmed, inflight: conversation.inflight });
   }
@@ -401,17 +421,19 @@ export class Controller extends EventEmitter {
     if (version !== this.metadataVersion) throw new Error('Codex disconnected while connecting.');
   }
 
-  async connect(resumeId?: string, fresh = false) {
+  async connect(resumeId?: string, fresh = false, refreshOutline = true) {
     this.ownerEpoch++;
     try { await this.preferences.load(); }
     catch (error) { this.notice(`Could not read new session preferences: ${(error as Error).message}`, true); }
     await this.rpc.start();
     await this.readAccountAndModels();
     this.connection = 'ready';
-    const id = resumeId ?? (fresh ? undefined : this.recovery?.selected);
+    const retired = resumeId === undefined ? reservationProbe()?.retired?.() : null;
+    const saved = fresh ? undefined : this.recovery?.selected;
+    const id = resumeId ?? (saved === retired ? undefined : saved);
     if (id) {
       if (this.recovery?.session(id)) { this.selected = this.conversation(id); this.changed(); }
-      await this.resume(id, resumeId === undefined);
+      await this.resume(id, resumeId === undefined, refreshOutline);
     } else await this.newThread();
     this.sessionsVersion++; this.changed();
   }
@@ -448,13 +470,13 @@ export class Controller extends EventEmitter {
       this.selected = await this.prepareNew(cwd); this.sessionsVersion++;
     } finally { this.navigation = ''; this.changed(); }
   }
-  async resume(id: string, recoverEmpty = false) {
+  async resume(id: string, recoverEmpty = false, refreshOutline = true) {
     this.ensureSelection();
     const cached = this.find(id);
     if (cached?.hydrated) { this.selected = cached; this.changed(); return; }
     this.navigation = 'Opening session…'; this.changed();
     try {
-      this.selected = await this.prepareSession(id, recoverEmpty);
+      this.selected = await this.prepareSession(id, recoverEmpty, refreshOutline);
     } finally { this.navigation = ''; this.changed(); }
   }
   forkReply(turnId: string) {

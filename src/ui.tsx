@@ -1,3 +1,4 @@
+import { turnMetrics } from './turn-usage';
 import { NATIVE_ABI_VERSION } from './native-abi';
 import { installContextUsage, contextUsageLabel, type ContextUsageStore } from './context-usage';
 /** @jsxImportSource @stencil-hq/tern */
@@ -17,7 +18,7 @@ import { Controller, type DisplayItem, type PendingRequest, type Completion } fr
 import { completionNotification } from './notifications';
 import { FolderSessions } from './folder-sessions';
 import { sessionInUse } from './session-locks';
-import { installChiefGuard, reservedMessage, type ChiefGuard } from './weixin-chief-guard';
+import { installChiefGuard, reservationProbe, reservedMessage, type ChiefGuard } from './weixin-chief-guard';
 import { Draft } from './draft';
 import { Composer } from './composer';
 import { parseCommand, commandHelp } from './commands';
@@ -36,6 +37,10 @@ import { runPluginCommand } from './tern-plugin';
 import { SessionDetails, WorkspaceForm, modelName } from './session-panels';
 import { ReadingPositions, readingAnchorClass, readingPromptMap, inspectReadingFocus, sameReadingView, type ReadingView } from './reading-position';
 import type { OutlineLocation } from './session-outline';
+import type { PromptAnchor } from './prompt-anchor';
+import type { PromptNode } from './prompt-tree';
+import { PromptTreeState } from './prompt-tree-state';
+import { PromptMinimap, promptTreeDrawing, promptTreeStyles } from './prompt-tree-view';
 
 const styles = css`
   .ct-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -68,6 +73,7 @@ export class NativeUI {
   private chiefGuard?: ChiefGuard;
   private contextUsage: ContextUsageStore;
   private reservedChief: string | null = null;
+  private retiredChief: string | null = null;
   private sidebarRequested = false;
   private composer = new Composer();
   get draft() { return this.composer.draft; }
@@ -122,7 +128,10 @@ export class NativeUI {
   private tocLocation?: OutlineLocation & { threadId: string };
   private tocSelections = new Map<string, { revision: string; location: OutlineLocation; anchor: string; prompt: string; position?: ReadingView }>();
   private tocError?: { threadId: string; message: string };
-  openProject?: (cwd: string, resume?: string) => Promise<boolean>;
+  openProject?: (cwd: string, resume?: string, anchor?: PromptAnchor) => Promise<boolean>;
+  private readonly promptTree: PromptTreeState;
+  private promptTreeStyle = '';
+  private promptOpening = false;
   private readonly projectDirectory: string;
   private composerThread?: string;
   private completion?: Completion;
@@ -147,14 +156,18 @@ export class NativeUI {
     this.applyStyles();
     this.projectDirectory = c.cwd;
     this.folderSessions = new FolderSessions(c, () => this.schedule());
+    this.promptTree = new PromptTreeState(c.promptTree, () => this.schedule());
     if (state) {
-      const { folder, reading, ...saved } = state;
+      const { folder, reading, promptTreeSnapshot, ...saved } = state;
       Object.assign(this, saved);
+      Object.assign(this.promptTree, promptTreeSnapshot);
       for (const [id, position] of reading ?? []) this.readingPositions.saved.set(id, position);
       this.folderSessions.restoreReloadState(folder);
     }
     c.on('change', this.onChange);
     c.on('completion', this.onCompletion);
+    try { this.retiredChief = reservationProbe()?.retired?.() ?? null; }
+    catch (error) { c.notice((error as Error).message, true); }
     this.chiefGuard = installChiefGuard(c.rpc);
     this.chiefGuard?.rememberRequests(c.controlledConversations().flatMap(conversation => conversation.requests));
     void this.chiefGuard?.id().then(id => { this.reservedChief = id; if (!this.ended) this.schedule(); })
@@ -162,6 +175,7 @@ export class NativeUI {
   }
 
   applyStyles() {
+    this.surface.stylesheet('codex-tern-prompt-tree', promptTreeStyles);
     this.surface.stylesheet('codex-tern', styles);
     this.surface.stylesheet('codex-tern-appearance', appearanceStyles);
   }
@@ -244,7 +258,7 @@ export class NativeUI {
 
   assertReloadable() {
     if (this.ended) throw new Error('This window is closed.');
-    if (this.pasting || this.resolvingSkills || this.pendingActions || this.c.operation || this.c.selecting || this.navigating || this.tocJumping
+    if (this.pasting || this.resolvingSkills || this.pendingActions || this.c.operation || this.c.selecting || this.navigating || this.tocJumping || this.promptOpening
       || this.renaming?.saving || this.historyLoading || this.sidebarRequested)
       throw new Error('Wait for the current input or session action to finish, then reload the window.');
   }
@@ -261,6 +275,7 @@ export class NativeUI {
       proposalSelections: this.proposalSelections, proposalDrafts: this.proposalDrafts,
       previews: this.previews, failedPreviews: this.failedPreviews, folder: this.folderSessions.reloadState(),
       reading: this.readingPositions.saved, tocLocation: this.tocLocation, tocSelections: this.tocSelections,
+      promptTreeSnapshot: { open: this.promptTree.open, data: this.promptTree.data, selection: this.promptTree.selection },
       tocError: this.tocError, tocLines: this.tocLines };
   }
 
@@ -481,6 +496,69 @@ export class NativeUI {
     if (this.openProject && await projectRoot(cwd) !== await projectRoot(this.projectDirectory))
       return this.openProject(cwd);
     return this.navigate(() => this.c.newThread(cwd));
+  }
+
+  async openPrompt(anchor: PromptAnchor, cwd = this.c.cwd): Promise<boolean> {
+    if (this.promptOpening || this.navigating || this.c.selecting || this.pasting || this.panel) return false;
+    const origin = this.c.thread?.id;
+    let navigation = this.tocJump, destination = false;
+    const current = () => !this.ended && navigation === this.tocJump
+      && this.c.thread?.id === (destination ? anchor.threadId : origin);
+    this.promptOpening = true; this.render();
+    try {
+      if (this.openProject && await projectRoot(cwd) !== await projectRoot(this.projectDirectory))
+        return await this.openProject(cwd, anchor.threadId, anchor);
+      await this.c.promptTree.verify(anchor);
+      if (!current()) return false;
+      if (this.folderSessions.isLocked(anchor.threadId)) throw new Error('This session is open in another client.');
+      // Keep normal selection, composer and reading-position bookkeeping.
+      if (!await this.navigate(() => this.c.resume(anchor.threadId, false, false), anchor.threadId, true)) return false;
+      if (this.ended || this.c.thread?.id !== anchor.threadId) return false;
+      destination = true; navigation = this.tocJump;
+      this.tocSelections.delete(anchor.threadId);
+      const target = `${anchor.turnId}:${anchor.itemId}`;
+      // Load a contiguous conversation through the target, retaining all later
+      // replies and live output in the same chat.
+      while (current() && !this.c.items.some(e => e.id === target) && this.c.historyCursor) {
+        const before = this.c.historyCursor;
+        await this.c.loadHistory();
+        if (current() && before === this.c.historyCursor) throw new Error('Could not load this prompt. Try again.');
+      }
+      if (!current()) return false;
+      const entry = this.c.items.find(e => e.id === target && e.item.type === 'userMessage');
+      if (!entry) throw new Error('This prompt is no longer in the conversation. Refresh and try again.');
+      const key = entry.item.type === 'userMessage' && entry.item.clientId ? `${entry.turnId}:client:${entry.item.clientId}` : entry.id;
+      this.render();
+      await this.readingPositions.jump(anchor.threadId, `main.${key}`, current);
+      return current();
+    } catch (error) {
+      if (current()) this.c.notice((error as Error).message, true);
+      return false;
+    } finally { this.promptOpening = false; this.render(); }
+  }
+  private togglePromptTree() {
+    if (this.promptTree.open) this.promptTree.hide();
+    else if (this.c.thread) this.promptTree.show(this.c.thread.id, this.c.sessionsVersion);
+    this.render(); this.focusComposer();
+  }
+  private async jumpPrompt(node: PromptNode) {
+    const anchor = node.locations.find(a => a.threadId === this.c.thread?.id) ?? node.locations[0];
+    const thread = this.promptTree.data?.threads.find(t => t.id === anchor?.threadId);
+    if (!anchor || !thread) return;
+    if (await this.openPrompt(anchor, thread.cwd)) {
+      this.promptTree.selection.set(anchor.threadId, node.id); this.render();
+    }
+  }
+  private renderPromptTree() {
+    const id = this.c.thread?.id;
+    if (!id) return null;
+    this.promptTree.sync(id, this.c.sessionsVersion);
+    const style = this.promptTree.open && this.promptTree.data ? promptTreeDrawing(this.promptTree.data).style : '';
+    if (style !== this.promptTreeStyle) {
+      this.promptTreeStyle = style; this.surface.stylesheet('codex-tern-prompt-tree-layout', style);
+    }
+    return <PromptMinimap t={text => this.t(text)} state={this.promptTree} threadId={id} busy={this.promptOpening || this.navigating || this.c.selecting || !!this.pasting}
+      toggle={() => this.togglePromptTree()} refresh={() => { void this.promptTree.refresh(true); }} jump={node => this.action(() => this.jumpPrompt(node))} />;
   }
   async forkSession(threadId: string, turnId: string): Promise<boolean> {
     if (this.panel || this.pasting || this.c.operation || this.c.thread?.id !== threadId) return false;
@@ -857,7 +935,7 @@ export class NativeUI {
         error: this.tocError && this.tocError.threadId === c.thread?.id ? this.tocError.message : c.outline.error,
         location: this.tocLocation?.threadId === c.thread?.id ? this.tocLocation : undefined },
       cellWidth: this.session.caps.cell.w,
-      rows: this.folderSessions.snapshot.rows.map(row => ({ ...row, canArchive: row.canArchive && !this.hasSessionDraft(row.id) })),
+      rows: this.folderSessions.snapshot.rows.filter(row => row.id !== this.retiredChief).map(row => ({ ...row, canArchive: row.canArchive && !this.hasSessionDraft(row.id) })),
       archiveProtocol: 1, pinProtocol: 1, renameProtocol: 1, navigationProtocol: 1, newSessionProtocol: 1,
       reloadProtocol: this.reloadWindow ? 1 : undefined, uiGeneration: this.generation, navigation: this.sidebarNavigation })}
       onAction={{ refresh: () => { void this.folderSessions.refresh(); },
@@ -931,7 +1009,11 @@ export class NativeUI {
     const hasInput = !!this.draft.submittedText.trim() || (!this.answerTarget && this.images.length > 0);
     const sendEnabled = !this.panel && !this.draft.completing && hasInput;
     const displayModel = c.models.find(m => m.model === c.model)?.displayName ?? c.model;
+    const folderName = basename(c.cwd) || c.cwd;
+    const folderLabel = [...folderName].length > 16 ? [...folderName].slice(0, 15).join('') + '…' : folderName;
     const context = contextUsageLabel(this.contextUsage.get(c.thread?.id), c.preferences.language);
+    const snapshot = c.turnMetricsSnapshot;
+    const metrics = turnMetrics(snapshot?.usage, snapshot?.durationMs, c.preferences.language);
     const parts = transcriptParts(c.items, new Set([...c.turns.values()]
       .filter(turn => turn.status === 'completed').map(turn => turn.id)));
     const result = c.thread ? c.sessionResult(c.thread.id) : undefined;
@@ -995,12 +1077,21 @@ export class NativeUI {
             </row>
           </col>)}
         </section>}
-        {!!c.queue.length && <section key="queue" role="omp.queue" head={this.t(`Queued · ${c.queue.length}${c.queuePaused ? ' · paused' : ''}`)} collapsible>
-          {c.queue.map(q => <row key={q.id} role="omp.queue.item" justify="between"><text text={q.text || this.t("[Image]")} lines={2} />
-            {this.button('Remove', () => c.removeQueued(q.id))}</row>)}
-          {!c.busy && !c.unconfirmed.length && this.button('Run next', () => this.action(() => c.runQueue()))}
-          <text tone="muted" text={this.t("Queued locally. Stops and errors pause the queue.")} />
-        </section>}
+        {!!c.queue.length && <col key="queue" role="omp.queue" gap="xs">
+          {c.queue.map((q, index) => <row key={q.id} role="omp.queue.item" align="center" gap="sm" title={q.text || this.t('Queued image')}>
+            <icon key="icon" name="corner-down-right" />
+            <text key="text" text={(q.text || (q.images.length === 1 ? this.t('[Image]') : this.t(`[${q.images.length} images]`)))
+              .replace(/\t/g, ' ').replace(/\s*\r?\n\s*/g, ' ↵ ')} wrap="none" truncate="end" grow={1} />
+            {index === 0 && (c.queue.length > 1 || c.queuePaused) && <badge key="count" role="omp.queue.count"
+              text={[c.queue.length > 1 ? this.t(`${c.queue.length} queued`) : '', c.queuePaused ? this.t('paused') : ''].filter(Boolean).join(' · ')} />}
+            {index === 0 && !c.busy && !c.unconfirmed.length && <row key="run" role="omp.queue.edit" align="center" gap="xs"
+              aria={this.t("Run next")} title={this.t("Run next queued message")} onClick={() => this.action(() => c.runQueue())}>
+              <icon name="play" /><text text={this.t("Run next")} />
+            </row>}
+            <row key="remove" role="omp.queue.edit" align="center" gap="xs" aria={this.t("Remove queued message")} title={this.t("Remove queued message")}
+              onClick={() => c.removeQueued(q.id)}><icon name="x" /><text text={this.t("Remove")} /></row>
+          </row>)}
+        </col>}
         {this.renderWorking()}
         {this.reservedChief && c.thread?.id === this.reservedChief ? <card key="weixin-chief" role="ct.weixin-chief.readonly" head="微信 Chief 独立运行">
           <text text={c.rpc.ownsThread(this.reservedChief)
@@ -1062,12 +1153,13 @@ export class NativeUI {
           <row key="nav" role="ct.nav" align="center" gap="sm">
             <status key="status" role="omp.status" transparent grow={1}>
               <seg key="path" role="omp.status.path" icon="folder" priority={6} title={c.cwd}
-                onClick={() => this.openPanel('workspace')}>{basename(c.cwd) || c.cwd}</seg>
+                onClick={() => this.openPanel('workspace')}>{folderLabel}</seg>
               <seg key="connection" role="omp.status.account" priority={1}
                 icon={c.connection === 'ready' ? undefined : c.connection === 'disconnected' ? 'error' : 'clock'}>
                 {c.connection === 'ready' ? this.t(c.account) : c.connection === 'disconnected' ? this.t("Disconnected") : this.t("Connecting…")}
               </seg>
               <seg key="context" role="ct.context.usage" priority={5} title={context.title}>{context.text}</seg>
+              {metrics && <seg key="turn-metrics" role="ct.turn.metrics" priority={4} title={metrics.title}>{metrics.text}</seg>}
               {c.notices.some(n => !n.error) && <seg key="notice" icon="info" title={this.t("Codex notices")} onClick={() => this.openPanel('details')}>{this.t("Notice")}</seg>}
             </status>
             {(c.operation || !!this.pasting) && <row key="working" role="ct.working" gap="xs" align="center">
@@ -1078,6 +1170,7 @@ export class NativeUI {
       </col> as Node,
       layer: <col>{!this.panel && (this.draft.describe().c ?? []).filter((n): n is import('@oh-my-pi/pi-tui/native/node').NativeNode => 'k' in n && n.k === 'overlay')
         .map(n => ompNode(n, this.draft.context, () => this.render()))}
+        {!this.panel && this.renderPromptTree()}
         {this.isPicker() ? this.renderPicker() : this.panel && <overlay key="panel" role={`ct.dialog.${this.panel}`} anchor="center" size={this.panel === 'diff' ? 'lg' : 'md'} modal head={this.panelTitle()}>
         <col key="body" gap="sm">{this.renderPanel()}{!['workspace', 'details', 'rename'].includes(this.panel) && <><rule />{this.button('Close · Esc', () => this.closePanel())}</>}</col>
       </overlay>}</col> as Node,
@@ -1100,7 +1193,7 @@ export class NativeUI {
     switch (this.panel) {
       case 'skills': items = c.skills.items.map(s => ({ id: s.path, label: `$${s.name}`,
         detail: `${s.path} · ${s.description}`, title: s.path, icon: 'file' })); break;
-      case 'history': items = c.threads.map(t => ({ id: t.id, label: t.name || t.preview || this.t("New session"),
+      case 'history': items = c.threads.filter(t => t.id !== this.retiredChief).map(t => ({ id: t.id, label: t.name || t.preview || this.t("New session"),
         detail: this.shortPath(t.cwd), icon: 'message', facts: { updated: new Date(t.updatedAt * 1000).toLocaleDateString(c.preferences.language === 'zh-CN' ? 'zh-CN' : 'en-US') } })); break;
       case 'models': items = c.models.map(m => ({ id: m.model, label: m.displayName, detail: m.description,
         icon: 'model', badges: c.model === m.model ? [{ text: this.t("Current"), tone: 'accent' }] : undefined })); break;
@@ -1489,6 +1582,8 @@ export class NativeUI {
 
   disposeForReload() {
     this.ended = true; this.folderSessions.dispose();
+    // A replacement UI may already be reading through the retained service.
+    this.promptTree.hide(false);
     this.readingPositions.dispose();
     this.c.off('change', this.onChange);
     this.c.off('completion', this.onCompletion);
@@ -1499,6 +1594,7 @@ export class NativeUI {
 
   async close() {
     this.syncComposer(); this.disposeForReload(); this.enhanced?.disable();
+    this.c.promptTree.cancelTree();
     await this.c.flushRecovery().catch(error => { process.stderr.write(`Draft recovery: ${error.message}\n`); });
     await this.session.close(); this.clipboardInput?.dispose();
   }

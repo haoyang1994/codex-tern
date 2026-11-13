@@ -56,6 +56,7 @@ export class NativeHost {
   set openProject(value: NativeUI['openProject']) { this.current.openProject = value; }
   // Project IPC can select a session without the user reading this window.
   openSession(id: string) { return this.current.openSession(id, false); }
+  openPrompt(...args: Parameters<NativeUI['openPrompt']>) { return this.current.openPrompt(...args); }
   newSession() { return this.current.newSession(); }
   openSidebar() { return this.current.openSidebar(); }
 

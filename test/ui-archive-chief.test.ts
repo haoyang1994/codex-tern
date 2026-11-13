@@ -62,3 +62,23 @@ test('archiving a background ordinary row does not resume or archive the reserve
   assert.equal(f.c.isArchived('chief'), false);
   assert.equal(f.calls.length, 1);
 });
+
+test('retired Chief is excluded from the sidebar and history picker without changing ordinary rows', async t => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'chief-ui-retired-'));
+  await mkdir(join(dir, 'weixin'));
+  await writeFile(join(dir, 'weixin/chief-reservation.json'), JSON.stringify({ version: 1, role: 'weixin-chief', session: 'chief', retired: true }));
+  const previous = process.env.WB_DATA_DIR; const previousQA = process.env.QA_CODEX_HOME;
+  process.env.WB_DATA_DIR = dir; delete process.env.QA_CODEX_HOME;
+  const f = fixture(['selected', 'chief', 'other']);
+  t.after(async () => { if (previous === undefined) delete process.env.WB_DATA_DIR; else process.env.WB_DATA_DIR = previous;
+    if (previousQA !== undefined) process.env.QA_CODEX_HOME = previousQA; await f.ui.close(); await rm(dir, { recursive: true, force: true }); });
+  f.c.threads = ['selected', 'chief', 'other'].map(id => ({ id, cwd: '/tmp', name: id, updatedAt: 1 })) as any;
+  const bridge = (f.ui as any).renderSessionBridge();
+  assert.deepEqual(JSON.parse(bridge.props.title).rows.map((row: any) => row.id), ['selected', 'other']);
+  f.ui.panel = 'history';
+  assert.deepEqual((f.ui as any).pickerItems().map((row: any) => row.id), ['selected', 'other']);
+  await assert.rejects(f.c.resume('chief'), /微信专用 Chief/);
+});

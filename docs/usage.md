@@ -48,6 +48,14 @@ The same right-click menu has **Rename session**. Enter a name and press **Enter
 
 Sessions sort by last conversation activity, newest first. Sending a message or completing a task moves that session up, including background tasks. Opening an old session alone does not move it to the top. Refresh and pagination preserve this activity order.
 
+## Conversation tree
+
+Click the branch icon at the right edge of a conversation to show its vertical tree. It starts collapsed. Only fork points have prompt labels; ordinary messages are omitted. Hover for more text. The tree uses the conversation's font and the native light or dark theme.
+
+Click a fork point to jump straight to that prompt in the normal chat. Later replies remain available by scrolling. A shared ancestor stays in your selected branch when possible. Small dots at branch ends switch sessions at their last fork point; hover to see the session name. The same tree stays visible with the selected branch highlighted. Shared history appears once, and a new fork appears before its first new prompt. The map includes saved, non-archived forks. **Refresh** picks up branches created in another client. **Hide** folds the map back into its icon.
+
+Opening and navigating the tree never calls a model. Your drafts, attachments, undo history and running tasks stay with their sessions. **Fork from here** below a completed reply uses the existing fork behavior, including for older prompts reached through the tree. Interface labels are English; prompt excerpts keep their original language.
+
 ## Session TOC
 
 The **Session TOC** is a separate native card. It starts below **Sessions** and follows the selected conversation. Use its own drag handle and dividers to move or resize it anywhere in the layout. Closing either card leaves the other available. Reopen the outline with **Codex: Session TOC** in Tern's command palette.
@@ -81,6 +89,9 @@ On macOS, local recovery files live in `~/Library/Application Support/codex-tern
 ## Language and appearance
 
 Choose **More actions → Interface language** to switch between **English** and **简体中文**. The choice is saved under `codex-tern/preferences.json` in the application state directory and applies to new client launches in every workspace. Changing the language updates the current client and its sidebar immediately. Other open clients pick it up on restart. User messages, assistant replies, code, file paths and model names keep their original text.
+The light theme uses an opaque white conversation background, frosted-glass sidebars, and pale gray user messages. The sessions and topic sidebars use a 50% light tint over Tern's window material. With **Liquid Glass** or **Glass**, the desktop's color shows through, as in Claude Code's sidebar. Hovered and selected rows darken by 5% and 9%, so they read on any wallpaper. The conversation and both sidebars keep their focused look when another pane has focus. Clicking a session moves focus back to the conversation, so Tern's gray unfocused veil would otherwise cover the sidebars most of the time. Other panes in the tab still dim when unfocused. Tern always focuses the card you click, so a sidebar click briefly focuses it; the plugin returns focus to the conversation before doing anything else, and the tab keeps the conversation's title meanwhile. Dark mode follows Tern's existing theme.
+
+The conversation uses right-aligned user messages and a hover action to fork a reply. The sessions sidebar opens about 41 terminal cells wide, capped at 30% of the window; a manually chosen width is shared across windows. After rebuilding, use **Reload Window** to load the client styles. With the plugin installed, `tern plugin reload` also applies the shared styles to existing clients.
 
 The client and sidebar use Tern's configured font family, font size and line metrics. Change them in Tern settings; no separate client font setting is required. The caret uses the same line metric as the input text.
 

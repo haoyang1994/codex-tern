@@ -6,7 +6,7 @@ description = "Independent native cards for folder sessions and the current conv
 icon = "app-codex"
 window = "window.luau"
 host = "host.luau"
-styles = ["sessions.css", "appearance.css"]
+styles = ["sessions.css", "appearance.css", "theme.css"]
 
 [[blocks]]
 id = "sessions"

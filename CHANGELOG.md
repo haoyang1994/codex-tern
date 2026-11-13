@@ -2,9 +2,28 @@
 
 Notable changes, newest first. This log starts with the update below.
 
+## 2026-11-12
+
+### Changed
+
+- The light theme uses an opaque white conversation background, frosted-glass sidebars that let the window material's color show through (as in Claude Code), and pale gray user messages.
+- Conversation layout uses tighter paragraph and list spacing and gray inline code chips while retaining the configured Tern font and line metrics.
+- Your messages appear as right-aligned gray bubbles. The Activity summary reads like a muted status line with the chevron at the end, and **Fork from here** appears when you hover over a reply.
+- Sidebar and composer typography continue to follow the configured Tern font and line metrics.
+- The sessions sidebar opens wider by default (about 330 px, as in Claude Code). It previously opened at about half its intended width on Retina displays. A width you set yourself is kept.
+- Queued messages use OMP's compact rows above the composer, with a queue icon, single-line preview, inline controls and a shared count or paused badge. The old collapsible heading and explanatory footer are removed.
+
+### Fixed
+
+- The sessions and topic sidebars keep their glass look while you type in the conversation, instead of graying over whenever another pane has focus. Clicking a session hands focus straight back to the conversation without a gray flash, and the tab keeps the conversation's title instead of briefly showing "Sessions".
+- Question panels use the theme's fonts for prompts, choices, custom answers and buttons, including in chats already running.
+- Restored the Activity summary's transparent background and left-aligned text so it no longer appears as a full-width gray button.
+
 ## 2026-11-11
 
 ### Added
+
+- A collapsed conversation tree shows fork points and branches. Clicking a branch opens its full chat at the fork prompt. The same tree stays visible with the current branch highlighted, including when session lists omit fork metadata. Drafts, attachments and running work stay with their sessions.
 
 - Session rows use a single status light. Working rows share a host clock, so later-started sessions flash in phase; waiting, permission, completion and failure stay steady.
 - Composer footer shows native context usage, capacity and percentage, with exact counts on hover and unknown values left blank until reported. Compatible UI reloads retain per-session estimates.
@@ -31,6 +50,8 @@ Notable changes, newest first. This log starts with the update below.
 - Assistant progress and commentary stay outside collapsed command/tool blocks, preserving their chronological order.
 - Reserved Weixin Chief sessions cannot be resumed or modified by desktop clients; selected-session archiving skips them when choosing a replacement. Native RPC shutdown confirms that its owned process group has exited.
 - Ordinary Copy uses the native text selection; copying the complete Markdown or code/output is a separately named context-menu action.
+
+- Folder, account and notices are centered below the composer again after Tern's Reader styles stopped applying to the Codex surface.
 
 ## 2026-10-28
 

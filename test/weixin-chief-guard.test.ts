@@ -84,3 +84,20 @@ test('cached and newly received Chief answers are blocked through the same live 
   assert.throws(() => peer.respond(4, { decision: 'accept' }), /微信专用 Chief/);
   assert.equal(responses.length, 1);
 });
+
+test('retired Hermes reservation keeps its guard while marking only that historical session hidden', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'chief-retired-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 'weixin'));
+  const path = join(dir, 'weixin/chief-reservation.json');
+  const probe = reservationProbe({ WB_DATA_DIR: dir } as any)!;
+  await writeFile(path, JSON.stringify({ version: 1, role: 'weixin-chief', session: 'chief' }));
+  assert.equal(probe.retired!(), null);
+  await writeFile(path, JSON.stringify({ version: 1, role: 'weixin-chief', session: 'chief', retired: true }));
+  assert.equal(probe.retired!(), 'chief');
+  assert.equal(await probe(), 'chief');
+  const f = fixture(probe);
+  await assert.rejects(f.rpc.request('thread/resume', { threadId: 'chief' }), /微信专用 Chief/);
+  await f.rpc.request('thread/resume', { threadId: 'other' });
+  await writeFile(path, JSON.stringify({ version: 1, role: 'weixin-chief', session: 'chief', retired: 'yes' }));
+  assert.throws(() => probe.retired!(), /读取失败/);
+});

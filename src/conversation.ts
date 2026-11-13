@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { CodexRpc, RpcOutcomeUnknown } from './rpc';
 import { LatestRead } from './latest-read';
+import { TurnUsageTracker } from './turn-usage';
 import type { PendingForkTitle } from './recovery';
 import type { RpcId, RpcMessage } from './protocol';
 import type { Thread } from './generated/v2/Thread';
@@ -53,6 +54,7 @@ export class Conversation extends EventEmitter {
   effortOverride?: ReasoningEffort;
   readonly endedTurns = new Set<string>();
   readonly turns = new Map<string, Turn>();
+  readonly turnUsage = new TurnUsageTracker();
   private noticeSeq = 0;
   private draining = false;
   private completion?: Turn;
@@ -379,6 +381,7 @@ export class Conversation extends EventEmitter {
     let outlineChanged = false;
     switch (method) {
       case 'turn/started':
+        this.turnUsage.begin(p.turn.id);
         if (!this.endedTurns.has(p.turn.id)) {
           this.requests = this.requests.filter(r => !r.params.turnId || r.params.turnId === p.turn.id);
           this.activeTurn = p.turn.id; this.turns.set(p.turn.id, p.turn);
@@ -386,6 +389,7 @@ export class Conversation extends EventEmitter {
         break;
       case 'turn/completed': {
         const firstCompletion = !this.endedTurns.has(p.turn.id);
+        this.turnUsage.finish(p.turn.id);
         this.activity(p.turn.completedAt ?? Date.now() / 1000);
         this.turns.set(p.turn.id, p.turn);
         this.endedTurns.add(p.turn.id);
@@ -444,7 +448,9 @@ export class Conversation extends EventEmitter {
       }
       case 'turn/diff/updated': this.diff = p.diff; break;
       case 'turn/plan/updated': this.plan = p.plan; break;
-      case 'thread/tokenUsage/updated': this.tokens = p.tokenUsage?.last?.totalTokens ?? null; break;
+      case 'thread/tokenUsage/updated':
+        this.tokens = p.tokenUsage?.last?.totalTokens ?? null;
+        this.turnUsage.update(p.turnId, p.tokenUsage); break;
       case 'thread/name/updated': if (this.thread) this.thread.name = p.threadName ?? p.name; break;
       case 'thread/settings/updated':
         if (this.effective && p.threadSettings) {

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { CodexRpc } from './rpc';
 import type { Method, RpcId } from './protocol';
 
-export type ReservationProbe = (() => Promise<string | null>) & { peek?: () => string | null };
+export type ReservationProbe = (() => Promise<string | null>) & { peek?: () => string | null; retired?: () => string | null };
 export interface ChiefGuard { id(): Promise<string | null>; rememberRequests(requests: Iterable<{ id: RpcId; params: any }>): void }
 const installed = Symbol.for('codex-tern.weixin-chief-guard.v2');
 const readOnly = new Set(['thread/read', 'thread/turns/list', 'thread/loaded/list', 'thread/unsubscribe']);
@@ -22,11 +22,13 @@ export function reservationProbe(env = process.env): ReservationProbe | undefine
     const data = JSON.parse(raw);
     if (data.version !== 1 || data.role !== 'weixin-chief' || data.session !== null && (typeof data.session !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.session)))
       throw new Error('微信专用会话保护状态无效，未接管会话。');
-    return data.session as string | null;
+    if (data.retired !== undefined && typeof data.retired !== 'boolean') throw new Error('微信专用会话保护状态无效。');
+    return data as { session: string | null; retired?: boolean };
   };
   const failure = (error: unknown): null => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw new Error('微信专用会话保护状态读取失败，请稍后重试。'); };
-  const probe: ReservationProbe = async () => { try { return parse(await readFile(marker, 'utf8')); } catch (error) { return failure(error); } };
-  probe.peek = () => { try { return parse(readFileSync(marker, 'utf8')); } catch (error) { return failure(error); } };
+  const probe: ReservationProbe = async () => { try { return parse(await readFile(marker, 'utf8')).session; } catch (error) { return failure(error); } };
+  probe.peek = () => { try { return parse(readFileSync(marker, 'utf8')).session; } catch (error) { return failure(error); } };
+  probe.retired = () => { try { const data = parse(readFileSync(marker, 'utf8')); return data.retired ? data.session : null; } catch (error) { return failure(error); } };
   return probe;
 }
 
