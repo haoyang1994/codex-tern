@@ -329,7 +329,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
           const timer = setInterval(() => { if (existsSync(process.env.QA_PROGRESS_RELEASE_FILE)) { clearInterval(timer); done(); } }, 25);
         } else setTimeout(done, 1500);
       } else if (text.includes('QA_COPY_FIXTURE')) {
-        setTimeout(() => finish('Alpha SELECTME Omega\n\nSecond paragraph.'), 100);
+        setTimeout(() => finish('Alpha SELECTME Omega\n\nSecond [paragraph](https://example.com) with `a*b`.\n\n- **First**\n- Second'), 100);
       } else if (text.includes('QA_STATUS_FAIL')) {
         setTimeout(() => finish('QA_STATUS_FAILED_RESULT', 'failed'), 350);
       } else if (text.includes('background')) {

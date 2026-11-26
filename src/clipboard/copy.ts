@@ -1,8 +1,11 @@
 import { execFile } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { Node } from '@stencil-hq/tern';
+import { copyToClipboard } from '@oh-my-pi/pi-natives/clipboard';
 import { findExecutable } from '../launch';
 import { ternControlArgs } from '../tern-plugin';
+import { markdownText } from './markdown-text';
 
 const exec = promisify(execFile);
 
@@ -13,18 +16,33 @@ export async function copyNativeSelection() {
   if (JSON.parse(stdout).ok !== true) throw Error('Tern could not copy the selected text.');
 }
 
-/** Built-in node `copy` is whole-source copy. Give it an explicit label while
- * routing ordinary Copy through the native pane-selection action instead. */
-export function selectionCopyMenus(root: Node, copy: () => void, language: string): Node {
-  const children = root.children.map(n => selectionCopyMenus(n, copy, language));
+export async function copyPlainText(text: string) {
+  if (process.env.CODEX_TERN_CONTROL) {
+    // Native selection uses Tern's private clipboard. Capture owner-side
+    // writes separately so offscreen tests cannot reach the desktop clipboard.
+    const target = process.env.CODEX_TERN_QA_CLIPBOARD_FILE;
+    if (!target) throw Error('The offscreen clipboard capture file is unavailable.');
+    await writeFile(target, text, { mode: 0o600 });
+  } else {
+    copyToClipboard(text);
+  }
+}
+
+/** The host handles selections and literal code/output. Only whole Markdown needs conversion. */
+export function transcriptCopyMenus(root: Node, copy: { selection: () => void; text: (text: string) => void },
+  language: string): Node {
+  const children = root.children.map(n => transcriptCopyMenus(n, copy, language));
   if (!['md', 'code', 'ansi'].includes(root.kind)) return new Node(root.kind, root.props, children, root.handlers);
   const zh = language === 'zh-CN';
+  const markdown = root.kind === 'md';
   const actions = (root.props.actions ?? {}) as { menu?: any[]; [key: string]: any };
   const original = actions.menu ?? [];
   const menu = original.filter((item: any) => (typeof item === 'string' ? item : item.id) !== 'copy');
-  menu.unshift({ id: 'copy-selection', label: zh ? '复制' : 'Copy', icon: 'copy' });
-  menu.push({ id: 'copy', label: root.kind === 'md' ? (zh ? '复制整段 Markdown' : 'Copy entire Markdown')
-    : (zh ? '复制全部代码/输出' : 'Copy all code/output'), icon: 'doc' });
-  return new Node(root.kind, { ...root.props, actions: { ...actions, menu } }, children,
-    { ...root.handlers, onAction: { ...root.handlers?.onAction, 'copy-selection': copy } });
+  menu.unshift({ id: markdown ? 'copy-text' : 'copy', label: zh ? '复制' : 'Copy', icon: 'copy' },
+    { id: 'copy-selection', label: zh ? '复制选区' : 'Copy selection', icon: 'copy' });
+  if (markdown) menu.push({ id: 'copy', label: zh ? '复制整段 Markdown' : 'Copy entire Markdown', icon: 'doc' });
+  const source = typeof root.props.text === 'string' ? root.props.text : '';
+  const onAction = { ...root.handlers?.onAction, 'copy-selection': copy.selection,
+    ...(markdown ? { 'copy-text': () => copy.text(markdownText(source)) } : {}) };
+  return new Node(root.kind, { ...root.props, actions: { ...actions, menu } }, children, { ...root.handlers, onAction });
 }

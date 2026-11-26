@@ -1,5 +1,4 @@
-// Isolated native owner and simulated Tern clipboard only. Never calls pbcopy,
-// pbpaste, OS clipboard APIs or the user's daily daemon/window.
+// Isolated native owner, Tern memory clipboard and private clipboard capture.
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, openSync, closeSync } from 'node:fs';
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
@@ -8,9 +7,11 @@ import assert from 'node:assert/strict';
 import { prepareTernQaConfig } from './qa-tern-config.mjs';
 const root = resolve(import.meta.dirname, '..'), out = resolve(root, '.prototype/copy-selection', `native-${process.pid}`);
 const config = resolve(out, 'config'), control = resolve(out, 'control.sock');
+const clipboardFile = resolve(out, 'plain-clipboard.txt');
 await prepareTernQaConfig(config); await mkdir(resolve(out, 'codex/thread-writer-locks'), { recursive: true });
 const env = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}`, TERN_CONFIG_DIR: config,
-  TERN_DAEMON_SOCKET: resolve(out, 'daemon.sock'), CODEX_TERN_CONTROL: control, CODEX_TERN_WEIXIN_DISABLE: '1',
+  TERN_DAEMON_SOCKET: resolve(out, 'daemon.sock'), CODEX_TERN_CONTROL: control,
+  CODEX_TERN_QA_CLIPBOARD_FILE: clipboardFile, CODEX_TERN_WEIXIN_DISABLE: '1',
   WB_DATA_DIR: resolve(out, 'workbench'), XDG_STATE_HOME: resolve(out, 'state'), XDG_CACHE_HOME: resolve(out, 'cache'),
   CODEX_HOME: resolve(out, 'codex'), QA_CODEX_HOME: resolve(out, 'codex'), QA_RPC_LOG: resolve(out, 'rpc.jsonl'), TERN_TSP_RECORD: resolve(out, 'wire.jsonl') };
 delete env.TERN_WINDOW_SOCKET; delete env.TERN_WINDOW_KEY;
@@ -42,13 +43,14 @@ async function pastedText(expected, name) {
   await writeFile(resolve(out, `${name}.json`), JSON.stringify({ expected, actual, transport: 'Tern headless memory clipboard -> native paste -> isolated draft' }, null, 2));
   ctl('key Meta+a'); ctl('key Backspace');
 }
-const source = 'Alpha SELECTME Omega\n\nSecond paragraph.';
+const source = 'Alpha SELECTME Omega\n\nSecond [paragraph](https://example.com) with `a*b`.\n\n- **First**\n- Second';
+const plain = 'Alpha SELECTME Omega\n\nSecond paragraph with a*b.\n\n• First\n• Second';
 try {
   await wait(() => existsSync(env.TERN_DAEMON_SOCKET), 'private daemon');
   server = spawn('tern', ['serve', '--control', control, '--out', out, '--cwd', root], { env, stdio: ['ignore', fd, fd] });
   await wait(() => existsSync(control), 'offscreen renderer');
   const quote = s => "'"+s.replaceAll("'", "'\\''")+"'";
-  const keys = ['PATH','TERN_CONFIG_DIR','TERN_DAEMON_SOCKET','CODEX_TERN_CONTROL','CODEX_TERN_WEIXIN_DISABLE','WB_DATA_DIR','XDG_STATE_HOME','XDG_CACHE_HOME','CODEX_HOME','QA_CODEX_HOME','QA_RPC_LOG','TERN_TSP_RECORD'];
+  const keys = ['PATH','TERN_CONFIG_DIR','TERN_DAEMON_SOCKET','CODEX_TERN_CONTROL','CODEX_TERN_QA_CLIPBOARD_FILE','CODEX_TERN_WEIXIN_DISABLE','WB_DATA_DIR','XDG_STATE_HOME','XDG_CACHE_HOME','CODEX_HOME','QA_CODEX_HOME','QA_RPC_LOG','TERN_TSP_RECORD'];
   ctl('run '+JSON.stringify(['env', ...keys.map(k=>`${k}=${env[k]}`),process.execPath,resolve(root,'dist/cli.mjs'),'--codex',resolve(root,'test/fixtures/ui-app-server.mjs')].map(quote).join(' ')));
   await wait(() => tree('[data-role="omp.composer.send"]').length > 0, 'ready native session');
   ctl('type "QA_COPY_FIXTURE"'); ctl('key Enter');
@@ -66,15 +68,19 @@ try {
   select(); ctl(`click ${x+72} ${y+h/2} right`);
   const menu = tree('[role="menuitem"]');
   await writeFile(resolve(out, 'context-menu.json'), JSON.stringify(menu, null, 2));
-  assert.ok(menu.some(n=>n.text === 'Copy')); assert.ok(menu.some(n=>n.text === 'Copy entire Markdown'));
+  assert.deepEqual(menu.map(n => n.text), ['Copy', 'Copy selection', 'Copy entire Markdown']);
   shot('copy-menu');
   const pick = text => {
     const item = tree('[role="menuitem"]').find(n=>n.text === text); assert.ok(item, text);
     const [mx,my,mw,mh]=item.rect; ctl(`click ${mx+mw/2} ${my+mh/2}`);
   };
-  pick('Copy');
+  pick('Copy selection');
   await pause(400); await pastedText('SELECTME', 'selection-copy');
-  passed.push('ordinary right-click Copy uses native pane selection; whole-source copy is explicitly named');
+  passed.push('right-click Copy selection preserves the native text selection');
+  ctl(`click ${x+72} ${y+h/2} right`); pick('Copy');
+  await wait(async () => existsSync(clipboardFile) && await readFile(clipboardFile, 'utf8') === plain,
+    'private capture of whole-block copy');
+  passed.push('default right-click Copy writes the whole Markdown block as readable text to the private capture');
   ctl(`click ${x+72} ${y+h/2} right`); pick('Copy entire Markdown');
   await pastedText(source, 'entire-copy');
   passed.push('explicit Copy entire Markdown retains native whole-source copying');

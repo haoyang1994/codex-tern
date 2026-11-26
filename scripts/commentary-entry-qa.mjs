@@ -9,9 +9,11 @@ import { createHash } from 'node:crypto';
 import { prepareTernQaConfig } from './qa-tern-config.mjs';
 const root = resolve(import.meta.dirname, '..'), out = resolve(root, '.prototype/commentary-entry', `native-${process.pid}`);
 const config = resolve(out, 'config'), control = resolve(out, 'control.sock');
+const clipboardFile = resolve(out, 'plain-clipboard.txt');
 await prepareTernQaConfig(config); await mkdir(resolve(out, 'codex/thread-writer-locks'), { recursive: true });
 const env = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}`, TERN_CONFIG_DIR: config,
-  TERN_DAEMON_SOCKET: resolve(out, 'daemon.sock'), CODEX_TERN_CONTROL: control, CODEX_TERN_WEIXIN_DISABLE: '1',
+  TERN_DAEMON_SOCKET: resolve(out, 'daemon.sock'), CODEX_TERN_CONTROL: control,
+  CODEX_TERN_QA_CLIPBOARD_FILE: clipboardFile, CODEX_TERN_WEIXIN_DISABLE: '1',
   WB_DATA_DIR: resolve(out, 'workbench'), XDG_STATE_HOME: resolve(out, 'state'), XDG_CACHE_HOME: resolve(out, 'cache'),
   CODEX_HOME: resolve(out, 'codex'), QA_CODEX_HOME: resolve(out, 'codex'), QA_RPC_LOG: resolve(out, 'rpc.jsonl'), QA_HISTORY_FILE: resolve(out, 'history.json'), QA_PROGRESS_RELEASE_FILE: resolve(out, 'release-progress'), TERN_TSP_RECORD: resolve(out, 'wire.jsonl') };
 await mkdir(resolve(config, 'plugins'), { recursive: true });
@@ -72,10 +74,13 @@ async function verifyCopies() {
   let selected=await select();ctl('key Meta+c');await pasted(selected,'actual-entry-cmd-copy');
   selected=await select();ctl(`click ${x+60} ${y+h/4} right`);await evidence('actual-entry-copy-menu');
   const pick=label=>{const n=tree('[role="menuitem"]').find(n=>n.text===label);assert.ok(n,label);const[a,b,w,h]=n.rect;ctl(`click ${a+w/2} ${b+h/2}`);};
-  pick('Copy');await pause(300);await pasted(selected,'actual-entry-context-copy');
+  pick('Copy selection');await pause(300);await pasted(selected,'actual-entry-context-copy');
+  ctl(`click ${x+60} ${y+h/4} right`);pick('Copy');
+  await wait(async()=>existsSync(clipboardFile) && await readFile(clipboardFile,'utf8')===paragraph.text,
+    'private capture of whole-block copy');
   await select();ctl(`click ${x+60} ${y+h/4} right`);pick('Copy entire Markdown');await pasted(paragraph.text,'actual-entry-whole-copy');
   // Ctrl+C intentionally retains the application's stop/exit semantics.
-  passed.push('actual entry Chinese commentary selection: Cmd+C and ordinary Copy exact; explicit whole-block action only copies full text');
+  passed.push('actual entry Chinese commentary: Cmd+C and Copy selection copy the selection; Copy and Copy entire Markdown copy the whole block');
 }
 async function generation() {
   let value;
@@ -92,7 +97,7 @@ try {
   server=spawn('tern',['serve','--control',control,'--out',out,'--cwd',root],{env,stdio:['ignore',fd,fd]});
   await wait(()=>existsSync(control),'private offscreen renderer'); ctl('resize 1000 900');
   const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
-  const keys=['PATH','TERN_CONFIG_DIR','TERN_DAEMON_SOCKET','CODEX_TERN_CONTROL','CODEX_TERN_WEIXIN_DISABLE','WB_DATA_DIR','XDG_STATE_HOME','XDG_CACHE_HOME','CODEX_HOME','QA_CODEX_HOME','QA_RPC_LOG','QA_HISTORY_FILE','QA_PROGRESS_RELEASE_FILE','TERN_TSP_RECORD'];
+  const keys=['PATH','TERN_CONFIG_DIR','TERN_DAEMON_SOCKET','CODEX_TERN_CONTROL','CODEX_TERN_QA_CLIPBOARD_FILE','CODEX_TERN_WEIXIN_DISABLE','WB_DATA_DIR','XDG_STATE_HOME','XDG_CACHE_HOME','CODEX_HOME','QA_CODEX_HOME','QA_RPC_LOG','QA_HISTORY_FILE','QA_PROGRESS_RELEASE_FILE','TERN_TSP_RECORD'];
   const launch=extra=>ctl('run '+JSON.stringify(['env',...keys.map(k=>`${k}=${env[k]}`),process.execPath,entry,'--native','--codex',resolve(root,'test/fixtures/ui-app-server.mjs'),...extra].map(quote).join(' ')));
   launch([]); await wait(()=>tree('[data-role="omp.composer.send"]').length>0,'checkout entry owner ready');
   ctl('type "QA_COMMENTARY_FIXTURE"'); ctl('key Enter');

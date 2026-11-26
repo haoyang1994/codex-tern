@@ -13,7 +13,7 @@ import { readSystemClipboard } from './clipboard/system';
 import { markdownFileLinks } from './clipboard/files';
 import { EnhancedPasteController } from './clipboard/enhanced-paste';
 import { ClipboardInput } from './clipboard/input';
-import { copyNativeSelection, selectionCopyMenus } from './clipboard/copy';
+import { copyNativeSelection, copyPlainText, transcriptCopyMenus } from './clipboard/copy';
 import { Controller, type DisplayItem, type PendingRequest, type Completion } from './controller';
 import { completionNotification } from './notifications';
 import { FolderSessions } from './folder-sessions';
@@ -1045,7 +1045,10 @@ export class NativeUI {
       id => !!c.thread && !!c.outlineLocation(c.thread.id, id));
     main = new Node(main.kind, main.props, main.children.map((node, i) =>
       html.div({ key: String(node.props.key ?? i), class: readingAnchorClass(this.readingPositions.nodes[i]!) }, node)));
-    main = selectionCopyMenus(main, () => this.action(() => copyNativeSelection()), c.preferences.language);
+    main = transcriptCopyMenus(main, {
+      selection: () => this.action(copyNativeSelection),
+      text: text => this.action(() => copyPlainText(text)),
+    }, c.preferences.language);
     this.surface.render(this.rendered = { main,
       dock: <col>
         {this.renderSessionBridge()}
