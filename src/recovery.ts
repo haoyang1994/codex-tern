@@ -14,7 +14,10 @@ export interface SavedSession {
   turnUsage?: Record<string, TurnUsage>;
   draft: SavedDraft; queue: SavedInput[]; unconfirmed: SavedInput[]; inflight?: SavedInput;
 }
-interface RecoveryData { version: 1; selected?: string; notifications: boolean; sessions: SavedSession[] }
+interface RecoveryData {
+  version: 1; selected?: string; notifications: boolean; sessions: SavedSession[];
+  ompDrafts?: Record<string, SavedDraft>;
+}
 
 export function recoveryPath(projectAddress: string) {
   const root = process.env.XDG_STATE_HOME || (process.platform === 'darwin'
@@ -32,6 +35,8 @@ const input = (x: unknown): x is SavedInput => draft(x) && typeof (x as SavedInp
 function validate(value: unknown): asserts value is RecoveryData {
   if (!object(value) || value.version !== 1 || typeof value.notifications !== 'boolean'
     || (value.selected !== undefined && typeof value.selected !== 'string') || !Array.isArray(value.sessions)
+    || (value.ompDrafts !== undefined && (!object(value.ompDrafts)
+      || !Object.entries(value.ompDrafts).every(([key, saved]) => /^omp:[a-zA-Z0-9_-]{1,128}$/.test(key) && draft(saved))))
     || !value.sessions.every((s: unknown) => object(s) && typeof s.id === 'string' && typeof s.cwd === 'string'
       && (s.name === undefined || typeof s.name === 'string') && (s.preview === undefined || typeof s.preview === 'string')
       && (s.pendingForkTitle === undefined || (object(s.pendingForkTitle)
@@ -70,6 +75,18 @@ export class RecoveryStore {
   get notifications() { return this.data.notifications; }
   get sessions(): readonly SavedSession[] { return this.data.sessions; }
   session(id: string) { return this.data.sessions.find(s => s.id === id); }
+  ompDraft(key: string) { return this.data.ompDrafts?.[key]; }
+  setOmpDraft(key: string, draft: SavedDraft) {
+    const current = this.ompDraft(key);
+    if (draft.text || draft.images.length) {
+      if (JSON.stringify(current) === JSON.stringify(draft)) return;
+      (this.data.ompDrafts ??= {})[key] = structuredClone(draft);
+    } else {
+      if (!current || !this.data.ompDrafts) return;
+      delete this.data.ompDrafts[key];
+    }
+    this.schedule();
+  }
   update(session: SavedSession) {
     const index = this.data.sessions.findIndex(s => s.id === session.id);
     if (index >= 0 && JSON.stringify(this.data.sessions[index]) === JSON.stringify(session)) return;

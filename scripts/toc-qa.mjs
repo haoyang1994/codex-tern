@@ -134,6 +134,8 @@ try {
   pass('return visits and manually collapsed subtopics keep the correct reading highlight');
 
   click('[data-role="codex-tern.sessions.new"]');
+  await wait(() => tree('[placeholder="Choose a session engine"]').length === 1, 'session engine picker');
+  key('Enter');
   await wait(() => text('[data-role="codex-tern.toc.note"]').includes('Topics appear'), 'new session auto enabled');
   await unlink(release); click(editor); type('hold SUBSTITUTION rule'); key('Enter');
   await wait(() => text('[data-role="codex-tern.toc.status"]').includes('Updating'), 'live prompt update');

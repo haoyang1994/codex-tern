@@ -75,6 +75,7 @@ export class NativeUI {
   private reservedChief: string | null = null;
   private retiredChief: string | null = null;
   private sidebarRequested = false;
+  private newSessionRequested = false;
   private composer = new Composer();
   get draft() { return this.composer.draft; }
   set draft(value: Draft) { this.composer.draft = value; }
@@ -356,14 +357,13 @@ export class NativeUI {
     this.c.saveDraft(id, { text: draft.submittedText, images: [...composer.images], skills: draft.selectedSkills });
   }
   private syncComposer() {
-    const id = this.c.thread?.id;
-    if (!id) return;
+    const id = this.c.sessionKey;
     if (this.composerThread !== id) {
       if (this.composerThread) {
         this.saveComposer(this.composerThread, this.composer, this.savedDraft);
         this.sessionDrafts.set(this.composerThread, { composer: this.composer, answerTarget: this.answerTarget, savedDraft: this.savedDraft });
       }
-      const saved = this.sessionDrafts.get(id), recovered = this.c.savedDraft(id);
+      const saved = id ? this.sessionDrafts.get(id) : undefined, recovered = id ? this.c.savedDraft(id) : undefined;
       if (saved) {
         this.composer = saved.composer; this.answerTarget = saved.answerTarget; this.savedDraft = saved.savedDraft;
       } else if (this.composerThread || recovered) {
@@ -376,7 +376,7 @@ export class NativeUI {
       }
       this.composerThread = id;
     }
-    this.saveComposer(id, this.composer, this.savedDraft);
+    if (id) this.saveComposer(id, this.composer, this.savedDraft);
     for (const [other, saved] of this.sessionDrafts) if (other !== id)
       this.saveComposer(other, saved.composer, saved.savedDraft);
   }
@@ -397,16 +397,27 @@ export class NativeUI {
   private focusComposer() { this.focused = 'dock.body.line.input'; this.surface.focus(this.focused); }
   async openSidebar() {
     if (this.ended) return;
-    void this.folderSessions.refresh();
+    void this.refreshSessions();
     this.sidebarRequested = true; this.render();
     try { await runPluginCommand('sessions'); }
     catch { /* The native client remains usable without the optional window plugin. */ }
     finally { this.sidebarRequested = false; this.schedule(); }
   }
+  private async refreshSessions() {
+    await Promise.all([this.folderSessions.refresh(), this.c.refreshOmp()]).catch(error => this.folderSessions.fail(error.message));
+  }
+  private async chooseNewSession() {
+    if (this.newSessionRequested) return;
+    if (this.pasting) throw new Error('Wait for the paste to finish.');
+    this.newSessionRequested = true;
+    this.render();
+    try { await runPluginCommand('new-session'); }
+    finally { this.newSessionRequested = false; this.schedule(); }
+  }
   private hasSessionDraft(id: string) {
     const saved = this.sessionDrafts.get(id);
     const recovered = this.c.savedDraft(id);
-    return id === this.c.thread?.id ? !!(this.draft.text || this.images.length || this.answerTarget)
+    return id === this.c.sessionKey ? !!(this.draft.text || this.images.length || this.answerTarget)
       : saved ? !!(saved.composer.draft.text || saved.composer.images.length || saved.answerTarget)
         : !!(recovered?.text || recovered?.images.length);
   }
@@ -498,6 +509,36 @@ export class NativeUI {
     return this.navigate(() => this.c.newThread(cwd));
   }
 
+  async openOmp(id?: string, cwd = this.c.cwd): Promise<string> {
+    if (this.pasting || this.panel || this.resolvingSkills) {
+      const message = 'Finish the paste or close the open dialog before switching.';
+      this.folderSessions.fail(message); throw new Error(message);
+    }
+    let selected: string | undefined;
+    let failure: unknown;
+    await this.navigate(async () => {
+      try { selected = await this.c.openOmp(id, cwd); }
+      catch (error) { failure = error; throw error; }
+    }, undefined, true);
+    if (!selected) throw failure ?? new Error('Wait for the session to finish opening.');
+    return selected;
+  }
+
+  private async archiveOmp(id?: string) {
+    if (!id) return;
+    if (this.panel || this.pasting) throw new Error('Finish the paste or close the open dialog before archiving.');
+    const rows = this.mixedSessionRows();
+    const at = rows.findIndex(row => row.source === 'omp' && row.id === id);
+    if (at < 0) throw new Error('This omp session is unavailable in the current project.');
+    const reserved = await this.chiefGuard?.id();
+    const replacement = [...rows.slice(at + 1), ...rows.slice(0, at).reverse()]
+      .find(row => !row.locked && (row.source === 'omp' || (this.c.codexConnection === 'ready' && row.id !== reserved)));
+    const key = 'omp:' + id;
+    if (await this.navigate(() => this.c.archiveOmp(id, replacement, () => this.hasSessionDraft(key)), undefined, true)) {
+      this.sessionDrafts.delete(key); this.readingPositions.saved.delete(key);
+    }
+  }
+
   async openPrompt(anchor: PromptAnchor, cwd = this.c.cwd): Promise<boolean> {
     if (this.promptOpening || this.navigating || this.c.selecting || this.pasting || this.panel) return false;
     const origin = this.c.thread?.id;
@@ -571,7 +612,7 @@ export class NativeUI {
     this.tocJump++; this.tocJumping = false;
     this.syncComposer();
     this.folderSessions.clearError();
-    const previous = this.c.thread?.id;
+    const previous = this.c.sessionKey;
     try {
       await this.readingPositions.capture(previous);
       if (this.ended) return false;
@@ -589,7 +630,7 @@ export class NativeUI {
     finally {
       this.syncComposer();
       this.render(); this.focusComposer();
-      if (this.c.thread?.id !== previous) await this.readingPositions.restore(this.c.thread?.id);
+      if (this.c.sessionKey !== previous) await this.readingPositions.restore(this.c.sessionKey);
       this.navigating = false;
       if (this.pendingSession) {
         const next = this.pendingSession; this.pendingSession = undefined;
@@ -617,10 +658,10 @@ export class NativeUI {
     if (this.pasting) { this.c.notice('Wait for the paste to finish.'); return; }
     this.panel = panel; this.dialogDraft = new Draft();
     this.pickerSelected = panel === 'models' ? this.c.model : panel === 'default-model' ? this.c.newSessionModel ?? 'codex-default' : panel === 'effort' ? this.c.effort
-      : panel === 'send-mode' ? this.sendMode : panel === 'history' ? this.c.thread?.id ?? '' : '';
+      : panel === 'send-mode' ? this.sendMode : panel === 'history' ? this.c.sessionKey ?? '' : '';
     if (panel === 'history') {
       this.historyLoading = true;
-      this.action(async () => { try { await this.c.listThreads(this.allThreads); } finally { this.historyLoading = false; this.render(); } });
+      this.action(async () => { try { await Promise.all([this.c.refreshOmp(), this.c.codexConnection === 'ready' && this.c.listThreads(this.allThreads)]); } finally { this.historyLoading = false; this.render(); } });
     }
     if (panel === 'skills') {
       this.dialogDraft.set(text);
@@ -698,7 +739,7 @@ export class NativeUI {
         item.id === entry.id && item.turnId === entry.turnId && item.done &&
         item.item.type === 'agentMessage' && item.item.text === text);
     const disabled = !available();
-    const forkable = this.c.forkReply(entry.turnId)?.id === entry.id;
+    const forkable = this.c.engine !== 'omp' && this.c.forkReply(entry.turnId)?.id === entry.id;
     const forkEnabled = () => !!threadId && this.c.thread?.id === threadId && this.c.sessionReady
       && !this.c.operation && !this.panel && !this.pasting && this.c.forkReply(entry.turnId)?.id === entry.id;
     let number = 0;
@@ -775,13 +816,18 @@ export class NativeUI {
       </card>;
     }
     if (i.type === 'agentMessage') return this.renderAssistant(entry, i.text);
-    if (i.type === 'reasoning' && entry.done && !(i.summary ?? []).join('').trim()) return null;
-    if (i.type === 'reasoning') return <section key={entry.id} role={entry.done ? 'omp.thinking' : 'omp.thinking.live'} head={entry.done ? this.t("Thought summary") : this.t("Thinking…")}>
-      <md key="text" text={(i.summary ?? []).join('\n\n') || this.t("Thinking…")} stream={!entry.done} />
-    </section>;
+    if (i.type === 'reasoning') {
+      const summary = (i.summary ?? []).join('\n\n');
+      const hasSummary = !!summary.trim();
+      if (entry.done && !hasSummary) return null;
+      return <section key={entry.id} role={entry.done ? 'omp.thinking' : 'omp.thinking.live'}
+        head={this.t(entry.done ? "Thought summary" : "Thinking…")}>
+        {hasSummary && <md key="text" text={summary} stream={!entry.done} />}
+      </section>;
+    }
     if (i.type === 'commandExecution') {
       const completed = this.c.turns.get(entry.turnId)?.status === 'completed';
-      const tool = <tool key={entry.id} name="shell" title={this.t("Run command")}
+      const tool = <tool key={entry.id} name="shell" title={this.t(this.c.engine === 'omp' ? "omp tool" : "Run command")}
         target={i.command} targetKind="command" status={status} collapsible={!completed} collapsed={!completed && entry.done}
         exit={i.exitCode ?? undefined} took={i.durationMs != null ? i.durationMs / 1000 : undefined}
         meta={[i.cwd ?? '']} preview={{ tail: 8 }}>
@@ -868,8 +914,32 @@ export class NativeUI {
 
   private renderRequest(r: PendingRequest) {
     const p = r.params;
-    const relevant = !p.threadId || p.threadId === this.c.thread?.id;
+    const relevant = !p.threadId || p.threadId === this.c.sessionId;
     const respond = (result: unknown) => { if (relevant) this.c.answer(r.id, result, r); };
+    if (r.method === 'omp/interaction') return <html.div key={`req${r.id}`} class="ct-request" role="ct.omp.request">
+      <col gap="sm">
+        <row role="ct.request.heading" gap="sm" align="center"><icon name="shield-alert" /><text text={this.t("omp needs your input")} /></row>
+        <text role="ct.request.prompt" text={[p.title, p.message].filter(Boolean).join('\n')} />
+        {p.method === 'select' && (p.options ?? []).map((option: string | { label: string }, index: number) => {
+          const label = typeof option === 'string' ? option : option.label;
+          return typeof label === 'string' && <html.button key={`omp-option-${index}`} class="ct-choice" aria={label}
+            onClick={() => respond({ value: label })}>{label}</html.button>;
+        })}
+        {(p.method === 'input' || p.method === 'editor') && !(p.secret || p.isSecret || p.masked) &&
+          this.button('Write an answer', () => {
+            if (!this.savedDraft) this.savedDraft = this.draft;
+            this.draft = new Draft(); this.draft.set(p.prefill ?? '');
+            this.answerTarget = { requestId: r.id, questionId: 'value' }; this.closePanel();
+          }, 'ct-quiet')}
+        <html.div class="ct-buttons ct-request-actions">
+          {this.button('Cancel', () => respond({ cancelled: true }))}
+          {p.method === 'confirm' && <>
+            {this.button('Decline', () => respond({ confirmed: false }), 'ct-danger')}
+            {this.button('Confirm', () => respond({ confirmed: true }), 'ct-primary')}
+          </>}
+        </html.div>
+      </col>
+    </html.div>;
     if (r.method === 'item/tool/requestUserInput') return <html.div key={`req${r.id}`} class="ct-request">
       <col gap="md">
         <row role="ct.request.heading" gap="sm" align="center"><icon name="message" /><text>{this.t("Codex needs your input")}</text></row>
@@ -925,20 +995,37 @@ export class NativeUI {
     </col></html.div>;
   }
 
+  private mixedSessionRows() {
+    const codex = this.folderSessions.snapshot.rows.filter(row => row.id !== this.retiredChief)
+      .map(row => ({ ...row, source: 'codex' as const, canArchive: row.canArchive && !this.hasSessionDraft(row.id) }));
+    const omp = this.c.ompRows.filter(row => !row.archived).map(row => ({ ...row, locked: false,
+      canArchive: row.canArchive && !this.c.selecting && !this.hasSessionDraft('omp:' + row.id) }));
+    return [...codex, ...omp].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.activityAt - a.activityAt);
+  }
+
   private renderSessionBridge() {
     const c = this.c;
     return <text key="sessions" hidden title={JSON.stringify({ ...this.folderSessions.snapshot, language: c.preferences.language, cols: this.session.caps.cols,
       sidebarRequest: this.sidebarRequested ? this.clientInstance : undefined,
+      newSessionRequest: this.newSessionRequested ? this.clientInstance : undefined,
+      activeKey: c.sessionKey, ompAvailable: true, selecting: c.selecting, showingOmp: c.engine === 'omp',
+      ompCurrent: c.engine === 'omp' ? c.sessionId : undefined,
+      ompArchived: c.ompRows.filter(row => row.archived).map(({ id, title }) => ({ id, title })),
       readingRequest: this.readingPositions.request,
       tocProtocol: 1, tocFollowProtocol: 1, tocClient: this.clientInstance, tocLines: this.tocLines,
       toc: c.outline && { ...c.outline,
         error: this.tocError && this.tocError.threadId === c.thread?.id ? this.tocError.message : c.outline.error,
         location: this.tocLocation?.threadId === c.thread?.id ? this.tocLocation : undefined },
       cellWidth: this.session.caps.cell.w,
-      rows: this.folderSessions.snapshot.rows.filter(row => row.id !== this.retiredChief).map(row => ({ ...row, canArchive: row.canArchive && !this.hasSessionDraft(row.id) })),
+      rows: this.mixedSessionRows(),
       archiveProtocol: 1, pinProtocol: 1, renameProtocol: 1, navigationProtocol: 1, newSessionProtocol: 1,
       reloadProtocol: this.reloadWindow ? 1 : undefined, uiGeneration: this.generation, navigation: this.sidebarNavigation })}
-      onAction={{ refresh: () => { void this.folderSessions.refresh(); },
+      onAction={{ refresh: () => { void this.refreshSessions(); },
+        'omp-new': () => { void this.openOmp().catch(() => {}); },
+        'omp-resume': e => { if (e.value) void this.openOmp(e.value).catch(() => {}); },
+        'omp-pin': e => { if (e.value) this.action(() => c.setOmpPinned(e.value!)); },
+        'omp-archive': e => this.action(() => this.archiveOmp(e.value)),
+        'omp-restore': e => { if (e.value) this.action(() => c.restoreOmp(e.value!)); },
         'reading-position': e => this.readingPositions.reply(e.value),
         'toc-get': e => { if (e.value) { this.tocError = undefined; void c.generateOutline(e.value); } },
         'toc-rebuild': e => { if (e.value) { this.tocError = undefined; void c.generateOutline(e.value, true); } },
@@ -969,7 +1056,7 @@ export class NativeUI {
   }
 
   private renderWorking() {
-    const thread = this.c.thread?.id, turn = this.c.activeTurn;
+    const thread = this.c.sessionKey, turn = this.c.activeTurn;
     if (!thread || !turn) {
       this.workingRow = undefined;
       if (thread) this.workingTurns.delete(thread);
@@ -1001,13 +1088,14 @@ export class NativeUI {
     this.draft.context = { cols: this.session.caps.cols, dark: this.session.caps.dark,
       reduceMotion: this.session.caps.reduceMotion, supports: kind => this.session.caps.kinds.includes(kind),
       feature: name => this.session.caps.features.includes(name as any) };
-    if (!this.answerTarget) this.draft.setWorkspace(c.cwd, c.skills, c.preferences.language);
+    const isOmp = c.engine === 'omp';
+    if (!this.answerTarget) this.draft.setWorkspace(c.cwd, isOmp ? undefined : c.skills, c.preferences.language);
     const localCommand = !this.answerTarget && parseCommand(this.draft.submittedText, this.images).kind !== 'text';
-    const ready = (localCommand || (c.sessionReady && !!c.thread && !c.operation && !c.unconfirmed.length)) && !this.pasting && !this.resolvingSkills;
+    const ready = (this.answerTarget || localCommand || (c.sessionReady && !!c.sessionId && !c.operation && !c.unconfirmed.length && (!isOmp || !c.busy && !c.requests.length))) && !this.pasting && !this.resolvingSkills;
     const pendingQuestion = this.answerTarget && c.requests.find(r => r.id === this.answerTarget!.requestId);
     if (this.answerTarget && !pendingQuestion) this.finishAnswer();
     const hasInput = !!this.draft.submittedText.trim() || (!this.answerTarget && this.images.length > 0);
-    const sendEnabled = !this.panel && !this.draft.completing && hasInput;
+    const sendEnabled = !this.panel && !this.draft.completing && (hasInput || (isOmp && !!this.answerTarget));
     const displayModel = c.models.find(m => m.model === c.model)?.displayName ?? c.model;
     const folderName = basename(c.cwd) || c.cwd;
     const folderLabel = [...folderName].length > 16 ? [...folderName].slice(0, 15).join('') + '…' : folderName;
@@ -1026,7 +1114,8 @@ export class NativeUI {
             onClick={() => { const id = c.thread?.forkedFromId; if (id && !c.selecting && !this.panel) this.action(() => this.openSession(id)); }}>
             {this.t("Open source")}</html.button>
         </row>}
-        {!c.items.length && <Welcome language={c.preferences.language} />}
+        {!c.items.length && (isOmp ? <text key="omp-welcome" role="omp.welcome" tone="muted" text={this.t("New omp session")} />
+          : <Welcome language={c.preferences.language} />)}
         {c.historyCursor && <text key="earlier" tone="muted" text={this.t("Load earlier messages")}
           onClick={() => this.action(() => c.loadHistory())} />}
         {parts.map(p => p.kind === 'message' ? this.renderItem(p.entry) : this.renderActivity(p, p === latestActivity))}
@@ -1064,19 +1153,19 @@ export class NativeUI {
         {(c.connection === 'disconnected' || (c.connection === 'ready' && !c.sessionReady && !c.selecting)) && <row key="reconnect" role="ct.reconnect" gap="sm" align="center">
           <icon name="warn" /><text grow={1} text={c.connection === 'disconnected'
             ? this.t("Disconnected · Your draft is kept") : this.t("Session unavailable · Your draft is kept")} />
-          <html.button class="ct-completion-action" onClick={() => this.action(() => c.connection === 'ready' && c.thread
+          <html.button class="ct-completion-action" onClick={() => this.action(() => isOmp ? this.openOmp(c.sessionId) : c.connection === 'ready' && c.thread
             ? c.resume(c.thread.id) : c.reconnect())}>{c.connection === 'disconnected' ? this.t("Reconnect") : this.t("Retry")}</html.button>
         </row>}
         {c.requests.map(r => this.renderRequest(r))}
         {!!c.unconfirmed.length && <section key="unconfirmed" head={this.t("Message delivery unconfirmed")}>
-          <text text={this.t("Codex may have received this message. Check the conversation before deciding to retry.")} />
-          {this.button('Check conversation', () => this.action(() => c.refreshHistory()))}
+          <text text={this.t(isOmp ? "omp may have received this message. Reconnect and check the conversation before deciding to retry." : "Codex may have received this message. Check the conversation before deciding to retry.")} />
+          {this.button('Check conversation', () => this.action(() => c.refreshHistory()), '', c.connection !== 'ready')}
           {c.unconfirmed.map(q => <col key={q.id} gap="xs">
             <text text={q.text || this.t("[Image]")} lines={3} />
             {!!q.images.length && <text tone="muted" text={this.t(`${q.images.length} attached image(s)`)} />}
             <row gap="sm">
-              {this.button('Already received', () => c.resolveUnconfirmed(q.id))}
-              {this.button('Queue for retry', () => c.resolveUnconfirmed(q.id, true))}
+              {this.button(isOmp ? 'Dismiss' : 'Already received', () => c.resolveUnconfirmed(q.id))}
+              {!isOmp && this.button('Queue for retry', () => c.resolveUnconfirmed(q.id, true))}
             </row>
           </col>)}
         </section>}
@@ -1116,13 +1205,15 @@ export class NativeUI {
           </row>}
           <row key="line" role="omp.composer.line" align="start" gap="sm">
             <editor key="input" {...this.draft.nativeProps}
-              maxLines={9} grow={1} placeholder={this.answerTarget ? this.t("Type your answer…") : c.activeTurn ? this.t("Steer this turn, or queue a follow-up…") : this.t("Message Codex…")}
-              sendable={ready && !this.panel && !this.answerTarget && !this.draft.completing} onEdit={e => { this.draft.nativeEdit(e); this.render(); }}
+              maxLines={9} grow={1} placeholder={this.answerTarget ? this.t("Type your answer…") : isOmp ? this.t("Message omp…")
+                : c.activeTurn ? this.t("Steer this turn, or queue a follow-up…") : this.t("Message Codex…")}
+              sendable={!!ready && !this.panel && (!this.answerTarget || isOmp) && !this.draft.completing} onEdit={e => { this.draft.nativeEdit(e); this.render(); }}
               onUndo={() => { this.draft.undo(); this.render(); }} onFocus={() => this.focusComposer()}
               onSend={e => { if (this.draft.text !== e.text) this.draft.set(e.text); void this.send(); }} />
           </row>
-          <row key="bar" role="omp.composer.bar" aria={this.t("Codex composer controls")} gap="sm" align="center" wrap>
+          <row key="bar" role="omp.composer.bar" aria={this.t(isOmp ? "omp composer controls" : "Codex composer controls")} gap="sm" align="center" wrap>
             <row key="settings" role="ct.composer.settings" gap="xs" align="center" grow={1}>
+              {isOmp ? <text key="omp-model" role="ct.omp.model" text={[displayModel, c.ompThinking].filter(Boolean).join(' · ')} /> : <>
               <row key="model" role="omp.composer.model" gap="xs" align="center" title={this.t("Switch model · Ctrl+Shift+P")}
                 onClick={() => this.openPanel('models')}>
                 <icon name="model" /><text wrap="none" text={displayModel} title={displayModel} /><icon name="chev" />
@@ -1131,15 +1222,14 @@ export class NativeUI {
                 onClick={() => this.openPanel('effort')}>
                 <effort level={c.effort} /><text wrap="none" text={this.t(c.effort)} />
               </row>
+              </>}
             </row>
             <row key="actions" role="ct.composer.actions" gap="xs" align="center">
-              <icon key="new" name="plus" title={this.t("New session · Ctrl+Shift+N")} aria={this.t("New session")} onClick={() => this.action(async () => {
-                if (this.pasting) throw new Error('Wait for the paste to finish.');
-                await this.newSession();
-              })} />
+              <icon key="new" name="plus" title={this.t("New session")} aria={this.t("New session")}
+                onClick={() => this.action(() => this.chooseNewSession())} />
               <icon key="history" name="history" title={this.t("Sessions · Ctrl+L")} aria={this.t("Sessions")} onClick={() => this.openPanel('history')} />
               <icon key="more" name="more" title={this.t("More actions")} aria={this.t("More actions")} onClick={() => this.openPanel('menu')} />
-              {c.activeTurn && !this.answerTarget && <html.button key="mode" role="ct.composer.mode"
+              {!isOmp && c.activeTurn && !this.answerTarget && <html.button key="mode" role="ct.composer.mode"
                 aria={this.t(`Send mode: ${this.sendMode === 'steer' ? 'Steer' : 'Queue'}`)} title={this.t("Choose how to send while running")}
                 attrs={{ 'aria-haspopup': 'dialog', 'aria-expanded': this.panel === 'send-mode' }}
                 onClick={() => this.openPanel('send-mode')}>
@@ -1147,23 +1237,23 @@ export class NativeUI {
               </html.button>}
               {c.activeTurn && <html.button key="stop" role="omp.composer.stop" class="ct-stop" aria={this.t("Stop current turn")} title={this.t("Stop · Ctrl+C")}
                 onClick={() => this.action(() => c.stop())}><html.span class="ct-stop-mark" attrs={{ 'aria-hidden': true }} /></html.button>}
-              {ready && (!c.activeTurn || hasInput) && <html.button key="send" role="omp.composer.send" class="ct-send" attrs={{ 'aria-disabled': !sendEnabled }}
-                aria={this.answerTarget ? this.t("Save answer") : this.t("Send message")}
-                title={this.answerTarget ? this.t("Save answer") : c.activeTurn ? this.sendMode === 'steer' ? this.t("Steer current turn") : this.t("Queue follow-up") : this.t("Send · Enter")}
+              {ready && (!c.activeTurn || hasInput || this.answerTarget) && <html.button key="send" role="omp.composer.send" class="ct-send" attrs={{ 'aria-disabled': !sendEnabled }}
+                aria={this.answerTarget ? this.t(isOmp ? "Submit answer" : "Save answer") : this.t("Send message")}
+                title={this.answerTarget ? this.t(isOmp ? "Submit answer" : "Save answer") : c.activeTurn ? this.sendMode === 'steer' ? this.t("Steer current turn") : this.t("Queue follow-up") : this.t("Send · Enter")}
                 onClick={sendEnabled ? () => { void this.send(); } : undefined}><icon name="arrow-up" /></html.button>}
             </row>
           </row>
           <row key="nav" role="ct.nav" align="center" gap="sm">
             <status key="status" role="omp.status" transparent grow={1}>
               <seg key="path" role="omp.status.path" icon="folder" priority={6} title={c.cwd}
-                onClick={() => this.openPanel('workspace')}>{folderLabel}</seg>
+                onClick={isOmp ? undefined : () => this.openPanel('workspace')}>{folderLabel}</seg>
               <seg key="connection" role="omp.status.account" priority={1}
                 icon={c.connection === 'ready' ? undefined : c.connection === 'disconnected' ? 'error' : 'clock'}>
                 {c.connection === 'ready' ? this.t(c.account) : c.connection === 'disconnected' ? this.t("Disconnected") : this.t("Connecting…")}
               </seg>
-              <seg key="context" role="ct.context.usage" priority={5} title={context.title}>{context.text}</seg>
+              {!isOmp && <seg key="context" role="ct.context.usage" priority={5} title={context.title}>{context.text}</seg>}
               {metrics && <seg key="turn-metrics" role="ct.turn.metrics" priority={4} title={metrics.title}>{metrics.text}</seg>}
-              {c.notices.some(n => !n.error) && <seg key="notice" icon="info" title={this.t("Codex notices")} onClick={() => this.openPanel('details')}>{this.t("Notice")}</seg>}
+              {c.notices.some(n => !n.error) && <seg key="notice" icon="info" title={this.t("Notices")} onClick={() => this.openPanel('details')}>{this.t("Notice")}</seg>}
             </status>
             {(c.operation || !!this.pasting) && <row key="working" role="ct.working" gap="xs" align="center">
               {!c.selecting && <spinner style="starburst" />}<text tone="muted" text={this.pasting ? this.t("Pasting…") : this.t(c.operation)} />
@@ -1173,7 +1263,7 @@ export class NativeUI {
       </col> as Node,
       layer: <col>{!this.panel && (this.draft.describe().c ?? []).filter((n): n is import('@oh-my-pi/pi-tui/native/node').NativeNode => 'k' in n && n.k === 'overlay')
         .map(n => ompNode(n, this.draft.context, () => this.render()))}
-        {!this.panel && this.renderPromptTree()}
+        {!this.panel && !isOmp && this.renderPromptTree()}
         {this.isPicker() ? this.renderPicker() : this.panel && <overlay key="panel" role={`ct.dialog.${this.panel}`} anchor="center" size={this.panel === 'diff' ? 'lg' : 'md'} modal head={this.panelTitle()}>
         <col key="body" gap="sm">{this.renderPanel()}{!['workspace', 'details', 'rename'].includes(this.panel) && <><rule />{this.button('Close · Esc', () => this.closePanel())}</>}</col>
       </overlay>}</col> as Node,
@@ -1196,8 +1286,8 @@ export class NativeUI {
     switch (this.panel) {
       case 'skills': items = c.skills.items.map(s => ({ id: s.path, label: `$${s.name}`,
         detail: `${s.path} · ${s.description}`, title: s.path, icon: 'file' })); break;
-      case 'history': items = c.threads.filter(t => t.id !== this.retiredChief).map(t => ({ id: t.id, label: t.name || t.preview || this.t("New session"),
-        detail: this.shortPath(t.cwd), icon: 'message', facts: { updated: new Date(t.updatedAt * 1000).toLocaleDateString(c.preferences.language === 'zh-CN' ? 'zh-CN' : 'en-US') } })); break;
+      case 'history': items = [...c.ompRows.filter(row => !row.archived).map(row => ({ id: 'omp:' + row.id, label: this.t(row.title), detail: 'omp', icon: 'app-omp' })), ...c.threads.filter(t => t.id !== this.retiredChief).map(t => ({ id: t.id, label: t.name || t.preview || this.t("New session"),
+        detail: this.shortPath(t.cwd), icon: 'message', facts: { updated: new Date(t.updatedAt * 1000).toLocaleDateString(c.preferences.language === 'zh-CN' ? 'zh-CN' : 'en-US') } }))]; break;
       case 'models': items = c.models.map(m => ({ id: m.model, label: m.displayName, detail: m.description,
         icon: 'model', badges: c.model === m.model ? [{ text: this.t("Current"), tone: 'accent' }] : undefined })); break;
       case 'default-model': items = [
@@ -1218,7 +1308,7 @@ export class NativeUI {
       default: items = [
         { id: 'skills', label: this.t('Skills'), icon: 'file' },
         { id: 'language', label: this.t('Interface language'), icon: 'settings', detail: c.preferences.language === 'zh-CN' ? '简体中文' : 'English' },
-        { id: 'new', label: this.t("New session"), icon: 'plus', detail: this.t("Ctrl+Shift+N") },
+        { id: 'new', label: this.t("New session"), icon: 'plus' },
         { id: 'history', label: this.t("Resume session"), icon: 'history', detail: this.t("Ctrl+L") },
         { id: 'workspace', label: this.t("Switch workspace"), icon: 'folder' },
         { id: 'attach', label: this.t("Attach image"), icon: 'image' },
@@ -1234,6 +1324,8 @@ export class NativeUI {
         { id: 'help', label: this.t("Keyboard shortcuts"), icon: 'keyboard' },
       ];
     }
+    if (c.engine === 'omp' && this.panel === 'menu')
+      items = items.filter(item => !['skills', 'workspace', 'attach', 'models', 'default-model', 'effort'].includes(item.id));
     const query = this.dialogDraft.text.toLowerCase().trim();
     return query ? items.filter(i => `${i.label} ${i.detail ?? ''}`.toLowerCase().includes(query)) : items;
   }
@@ -1251,7 +1343,7 @@ export class NativeUI {
       state={(this.panel === 'skills' && this.c.skills.loading) || (this.historyLoading && this.panel === 'history') || (folders && this.folderBrowser.loading) || (defaults && this.preferenceSaving) ? 'loading' : error ? 'error' : 'ready'}
       message={error || undefined}
       current={this.panel === 'language' ? [this.c.preferences.language] : this.panel === 'models' ? [this.c.model] : this.panel === 'effort' ? [this.c.effort]
-        : defaults ? [this.c.newSessionModel ?? 'codex-default'] : this.panel === 'send-mode' ? [this.sendMode] : this.panel === 'history' ? [this.c.thread?.id ?? ''] : []}
+        : defaults ? [this.c.newSessionModel ?? 'codex-default'] : this.panel === 'send-mode' ? [this.sendMode] : this.panel === 'history' ? [this.c.sessionKey ?? ''] : []}
       actions={[
         { id: 'confirm', label: folders ? this.t("Open folder") : defaults ? this.t("Set default") : this.panel === 'history' ? this.t("Resume") : this.t("Select"), keys: ['enter'], primary: !folders,
           disabled: !items.length || (defaults && this.preferenceSaving) || (folders && this.folderBrowser.loading) || undefined },
@@ -1284,7 +1376,11 @@ export class NativeUI {
       if (!skillNames(this.draft.text).includes(skill.name)) this.draft.editor.insertText(`${this.draft.cursor && !/\s/.test(this.draft.text[this.draft.cursor - 1]!) ? ' ' : ''}$${skill.name} `);
       this.draft.selectSkill(selected); this.closePanel();
     }
-    else if (this.panel === 'history') this.action(async () => { this.closePanel(); await this.openSession(id); });
+    else if (this.panel === 'history') this.action(async () => {
+      this.closePanel();
+      if (id.startsWith('omp:')) await this.openOmp(id.slice(4));
+      else await this.openSession(id);
+    });
     else if (this.panel === 'language' && isLanguage(id)) this.action(async () => {
       await this.c.preferences.setLanguage(id); this.c.changed(); this.closePanel();
     });
@@ -1293,7 +1389,7 @@ export class NativeUI {
     else if (this.panel === 'models') this.action(async () => { this.c.chooseModel(id); this.closePanel(); });
     else if (this.panel === 'effort') this.action(async () => { this.c.chooseEffort(id as ReasoningEffort); this.closePanel(); });
     else if (this.panel === 'send-mode' && (id === 'steer' || id === 'queue')) { this.sendMode = id; this.closePanel(); }
-    else if (id === 'new') this.action(async () => { this.closePanel(); await this.newSession(); });
+    else if (id === 'new') this.action(async () => { this.closePanel(); await this.chooseNewSession(); });
     else if (id === 'editing') { this.draft.setVim(!this.draft.vim); this.closePanel(); }
     else if (id === 'reload') this.requestReload();
     else if (id === 'notifications') {
@@ -1336,7 +1432,11 @@ export class NativeUI {
           onUndo={() => { this.dialogDraft.undo(); this.render(); }} onFocus={() => { this.focused = 'layer.panel.body.field'; this.surface.focus(this.focused); }} />
         {this.button('Attach image', () => this.action(() => this.confirmPath()), 'ct-primary')}
       </>;
-      case 'details': return <SessionDetails c={c} chooseModel={() => this.openModelPicker('models')}
+      case 'details': if (c.engine === 'omp') return <>
+        <text text={`omp · ${c.sessionId}`} /><text text={[c.model, c.ompThinking].filter(Boolean).join(' · ')} />
+        <text text={c.cwd} />{c.notices.map(notice => <text key={notice.id} text={notice.text} />)}
+        {this.button('Close · Esc', () => this.closePanel())}
+      </>; else return <SessionDetails c={c} chooseModel={() => this.openModelPicker('models')}
         chooseEffort={() => this.openModelPicker('effort')} chooseDefault={() => this.openModelPicker('default-model')} close={() => this.closePanel()} />;
       case 'diff': return <diff text={c.diff} mode="unified" />;
       case 'help': return <md text={commandHelp(false, this.c.preferences.language).split("\n").map(line => "- " + line).join("\n") + "\n\n" + this.t("**Keyboard shortcuts**\n\n- Ctrl+A / Ctrl+E — Start / end of line\n- Ctrl+B / Ctrl+F — Move left / right\n- Ctrl+P / Ctrl+N — Move up / down\n- Option+Left / Right — Move by word\n- Ctrl+H / Ctrl+D — Delete backward / forward\n- Ctrl+U / Ctrl+K / Ctrl+W — Delete to line start / end / previous word\n- Ctrl+Y / Option+Y — Restore deleted text / cycle earlier deletions\n- Command+A — Select all\n- Command+Z / Command+Shift+Z — Undo / redo\n- Enter — Send message\n- Shift+Enter — New line\n- Command+, — Tern terminal settings\n- Tab — Complete file paths\n- Command+V — Paste text, files or images through Tern\n- Ctrl+V — Paste from the system clipboard\n- Ctrl+Shift+N — New session\n- Ctrl+L — Resume session\n- Ctrl+Shift+P — Select model\n- Ctrl+Shift+R — Reload window without stopping tasks\n- Ctrl+C — Stop the current turn; quit when idle\n- Ctrl+Q — Quit\n- Esc — Close a panel\n\nUse **New session** above the sidebar list to start a conversation in the current folder. Other sessions keep their tasks and drafts.\n\nWhile Codex is working, choose **Steer** to add input to the current turn, or **Queue** to save it for the next turn. A stop or error pauses the local queue.\n\nPaste an image to see a thumbnail before sending. Click it to preview; use × to remove it. Image file paths and **Attach image** in the actions menu also work. Copy a PDF or another document in Finder and paste it to insert a Markdown file link.\n\nThis prototype does not support complex MCP forms, secure input, voice, or desktop host tools.")} />;
@@ -1372,8 +1472,9 @@ export class NativeUI {
   }
 
   private async attachFiles(paths: string[], target: Draft) {
-    const images = await Promise.all(paths.filter(isImagePath).map(loadImage));
-    const text = markdownFileLinks(paths.filter(path => !isImagePath(path)));
+    const canAttach = this.c.engine !== 'omp';
+    const images = canAttach ? await Promise.all(paths.filter(isImagePath).map(loadImage)) : [];
+    const text = markdownFileLinks(paths.filter(path => !canAttach || !isImagePath(path)));
     if (target !== this.draft || this.ended) return;
     if (text) target.key({ name: 'paste', text, ctrl: false, alt: false, shift: false, meta: false });
     for (const image of images) await this.attach(image);
@@ -1404,6 +1505,7 @@ export class NativeUI {
   }
 
   async pasteBinary(bytes: Uint8Array, mime: string) {
+    if (this.c.engine === 'omp') throw new Error('Use text or paste a file path in omp.');
     if (this.panel || this.answerTarget) throw new Error('Paste images into the message composer.');
     const target = this.draft;
     this.pasting++; this.render();
@@ -1415,7 +1517,7 @@ export class NativeUI {
 
   private async pasteClipboard() {
     const target = this.panel ? this.dialogDraft : this.draft;
-    const imageAllowed = !this.panel && !this.answerTarget;
+    const imageAllowed = this.c.engine !== 'omp' && !this.panel && !this.answerTarget;
     this.pasting++; this.render();
     try {
       const content = await readSystemClipboard(this.c.cwd, imageAllowed);
@@ -1456,17 +1558,21 @@ export class NativeUI {
   }
 
   async send() {
-    if (this.chiefGuard && this.c.thread?.id === await this.chiefGuard.id()) { this.c.notice(reservedMessage, true); return; }
+    if (this.chiefGuard && this.c.engine !== 'omp' && this.c.thread?.id === await this.chiefGuard.id()) { this.c.notice(reservedMessage, true); return; }
     if (this.pasting || this.resolvingSkills || this.panel) return;
     const text = this.draft.submittedText;
     if (this.answerTarget) {
       const r = this.c.requests.find(r => r.id === this.answerTarget!.requestId);
-      if (r && text.trim()) r.answers[this.answerTarget.questionId] = [text];
+      if (r?.method === 'omp/interaction') this.c.answer(r.id, { value: text }, r);
+      else if (r && text.trim()) r.answers[this.answerTarget.questionId] = [text];
       this.finishAnswer(); this.render(); return;
     }
     const command = parseCommand(text, this.images);
     if (command.kind === 'error') { this.c.notice(this.t(command.message), true); return; }
     if (command.kind === 'command') {
+      if (this.c.engine === 'omp' && ['skills', 'model'].includes(command.name)) {
+        this.c.notice('This command is available for Codex sessions.', true); return;
+      }
       if (command.name === 'language' && command.args && !isLanguage(command.args)) {
         this.c.notice('Usage: /language [en|zh-CN]', true); return;
       }
@@ -1478,9 +1584,11 @@ export class NativeUI {
         switch (command.name) {
           case 'exit': await this.close(); return;
           case 'help': this.openPanel('help'); break;
-          case 'new': if (!await this.newSession()) throw new Error('Could not create a session.'); break;
+          case 'new': if (this.c.engine === 'omp') { await this.chooseNewSession(); break; }
+            if (!await this.newSession()) throw new Error('Could not create a session.'); break;
           case 'resume':
             if (!command.args) this.openPanel('history');
+            else if (this.c.engine === 'omp') await this.openOmp(command.args);
             else if (!await this.openSession(command.args)) throw new Error('This session is unavailable.');
             break;
           case 'model': if (command.args) this.c.chooseModel(command.args); else this.openPanel('models'); break;
@@ -1498,10 +1606,10 @@ export class NativeUI {
     }
     if (!text.trim() && !this.images.length) return;
     if (!this.c.sessionReady) { this.c.notice('Reconnect and open this session before sending.'); return; }
-    if (this.c.operation) return;
+    if (this.c.operation || this.navigating || (this.c.engine === 'omp' && (this.c.busy || this.c.requests.length))) return;
     if (this.c.unconfirmed.length) { this.c.notice('Check the unconfirmed message before sending again.'); return; }
-    const composer = this.composer, threadId = this.c.thread?.id;
-    if (skillNames(text).length) {
+    const composer = this.composer, threadId = this.c.sessionKey;
+    if (this.c.engine !== 'omp' && skillNames(text).length) {
       const revision = this.draft.revision, cwd = this.c.cwd;
       this.resolvingSkills = true;
       try {
@@ -1520,7 +1628,10 @@ export class NativeUI {
       await sending; input.draft.addHistory(text);
     }
     catch (e) {
-      if (!isRpcOutcomeUnknown(e) && !composer.restore(input)) this.c.preserveInput(threadId, input.text, input.images, input.skills);
+      if (!isRpcOutcomeUnknown(e) && !composer.restore(input)) {
+        if (threadId?.startsWith('omp:')) composer.draft.set([input.text, composer.draft.text].filter(Boolean).join('\n\n'));
+        else this.c.preserveInput(threadId, input.text, input.images, input.skills);
+      }
       if (threadId) this.saveComposer(threadId, composer);
       this.c.sessionNotice(threadId, e instanceof Error ? e.message : String(e), true);
     }
@@ -1569,9 +1680,9 @@ export class NativeUI {
       }
       return true;
     }
-    if (key.ctrl && key.shift && !key.alt && !key.meta && key.name === 'n') { this.action(() => this.newSession()); return true; }
+    if (key.ctrl && key.shift && !key.alt && !key.meta && key.name === 'n') { this.action(() => this.c.engine === 'omp' ? this.chooseNewSession() : this.newSession()); return true; }
     if (key.ctrl && key.name === 'l') { this.openPanel('history'); return true; }
-    if (key.ctrl && key.shift && !key.alt && !key.meta && key.name === 'p') { this.openPanel('models'); return true; }
+    if (this.c.engine !== 'omp' && key.ctrl && key.shift && !key.alt && !key.meta && key.name === 'p') { this.openPanel('models'); return true; }
     if (key.name === 'enter' && !key.shift && !key.alt && !this.draft.completing) void this.send();
     else if (key.name === 'paste') this.pasteText(key.text ?? '');
     else {

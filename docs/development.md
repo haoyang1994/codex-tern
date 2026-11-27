@@ -204,9 +204,15 @@ Tested with Codex CLI 0.162.1, Tern 0.9.5, and Tern SDK 0.1.0. Complex MCP forms
 
 Run `bun unlink` in the source directory to remove the global command. To update, pull changes, run `bun install --frozen-lockfile`, and rebuild.
 
+## omp in the native client
+
+`NativeHost` keeps one Tern surface. The controller keeps each engine's sessions live and switches the state sent to the existing transcript and composer. `OmpRpc` negotiates the JSONL protocol. `OmpProject` verifies the native session ID and project against the persisted session header before adding a row. It keeps the original `codex-tern/omp/<project-key>/index` and `sessions` layout. The neighbouring `flags` directory holds pin and archive metadata. Older entries with no flag file read as active and unpinned.
+
+The host starts omp with native `always-ask` approval mode and routes native dialog replies from the composer. Run the isolated regression with `QA_OMP_BINARY=/path/to/omp bun scripts/omp-sessions-qa.mjs` after building. It uses a private Tern daemon, an offscreen renderer, a temporary project and a deterministic loopback model.
+
 ## Fixed Chief relay for native owners
 
-`src/weixin-owner.ts` subscribes to the owning controller, outside the replaceable UI. It publishes only hydrated conversations that the live Codex RPC owns. The native owner does not scan history, resume offline threads, choose a conversation, change models or grant permissions. This fork has a Codex app-server transport; its OMP imports are UI components, not an OMP engine/registry/approval transport. Other processes' OMP panes cannot be controlled through this adapter.
+`src/weixin-owner.ts` subscribes to the owning controller, outside the replaceable UI. It publishes only hydrated conversations that the live Codex RPC owns. The native owner does not scan history, resume offline threads, choose a conversation, change models or grant permissions. The relay only publishes Codex app-server ownership. omp has its own JSONL connection, project index and input requests, which stay in the native pane.
 
 A new native process automatically looks for `../real-workbench/runtime/weixin/bridge.mjs` beside this checkout and a `node` executable. Override the checkout with `CODEX_TERN_WORKBENCH_DIR`, Node with `CODEX_TERN_NODE`, and the channel namespace with `WB_DATA_DIR`. The tested Node is v24.19.0. `CODEX_TERN_WEIXIN_DISABLE=1` disables attachment; existing native QA profiles (`QA_CODEX_HOME`) never auto-attach to a real channel. Direct owner integration tests supply their own temporary `WB_DATA_DIR` and explicitly create `WeixinOwner`.
 

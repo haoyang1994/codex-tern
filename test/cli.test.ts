@@ -34,6 +34,17 @@ test('fork navigation preserves exact prompt anchors and profile directories acr
   assert.throws(() => parseOptions(['--runtime-env', JSON.stringify({ PATH: '/tmp' })]), /directory settings/);
 });
 
+test('the CLI defaults to Codex and accepts an exact omp resume in the chosen project', () => {
+  assert.equal(parseOptions([]).agent, 'codex');
+  const omp = parseOptions(['resume', 'omp-thread', '--agent', 'omp', '-C', 'project'], '/tmp');
+  assert.equal(omp.agent, 'omp');
+  assert.equal(omp.resume, 'omp-thread');
+  assert.equal(omp.cwd, '/tmp/project');
+  assert.throws(() => parseOptions(['--agent', 'unknown']), /--agent codex or --agent omp/);
+  assert.throws(() => parseOptions(['--agent', 'omp', '--plain']), /enter messages in Tern/);
+  assert.throws(() => parseOptions(['--agent', 'omp', 'prompt']), /enter messages in Tern/);
+});
+
 async function fixture(t: any) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'codex-tern-entry-')));
   t.after(() => rm(dir, { recursive: true, force: true }));

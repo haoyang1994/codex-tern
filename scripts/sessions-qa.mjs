@@ -360,6 +360,8 @@ try {
   await wait(() => tree('[data-role="omp.composer.line"]')[0].rect[3] > 75, 'multiline composer before new session');
   const beforeNew = tree('[data-role="codex-tern.sessions.item"]').map(n => n.title);
   click('[data-role="codex-tern.sessions.new"]');
+  await wait(() => tree('[placeholder="Choose a session engine"]').length === 1, 'session engine picker');
+  key('Enter');
   for (const delay of [0, 80, 160, 400]) {
     if (delay) { ctl(`wait ${delay}`); await pause(delay); }
     assertComposerLayout(`new session after ${delay} ms`);
@@ -431,6 +433,8 @@ try {
   type('Second message in this folder'); key('Enter');
   await wait(() => tree(row('Second message in this folder')).length === 1 && text('[data-role="omp.assistant"]').includes('QA_REPLY'), 'replacement accepts a first message');
   click('[data-role="codex-tern.sessions.new"]');
+  await wait(() => tree('[placeholder="Choose a session engine"]').length === 1, 'session engine picker');
+  key('Enter');
   await wait(() => tree('[data-role="omp.welcome"]').length === 1, 'new blank conversation');
   assert.equal(tree('[data-role="codex-tern.sessions.item"]').length, 1, 'a new blank session adds no row');
   await remove('Second message in this folder');

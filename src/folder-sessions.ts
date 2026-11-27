@@ -8,6 +8,7 @@ export interface FolderSession {
   title: string;
   titleRevision?: string;
   updatedAt: number;
+  activityAt: number;
   time: string;
   locked: boolean;
   running: boolean;
@@ -50,14 +51,14 @@ export class FolderSessions {
   constructor(private readonly c: Controller, private readonly changed: () => void,
     private readonly probe: LockProbe = ids => probeWriterLocks(c.rpc, ids)) {
     this.cwd = c.cwd;
-    this.connection = c.connection;
+    this.connection = c.codexConnection;
     this.rememberCurrent();
     this.observed = this.fingerprint();
     c.on('change', this.observe);
   }
 
   // Opening history changes updatedAt, but does not constitute chat activity.
-  private fingerprint() { return JSON.stringify([this.c.cwd, this.c.connection, this.c.sessionsVersion]); }
+  private fingerprint() { return JSON.stringify([this.c.cwd, this.c.codexConnection, this.c.sessionsVersion]); }
 
   private sort() { this.threads.sort((a, b) => activityAt(b) - activityAt(a)); }
   private allThreads() {
@@ -78,7 +79,7 @@ export class FolderSessions {
   }
 
   private rememberCurrent() {
-    const current = this.c.thread;
+    const current = this.c.codexThread;
     if (!current?.cwd || this.c.isArchived(current.id) || resolve(current.cwd) !== resolve(this.cwd)) return;
     const at = this.threads.findIndex(t => t.id === current.id);
     if (at < 0) this.threads.push(current);
@@ -86,8 +87,8 @@ export class FolderSessions {
   }
 
   private observe = () => {
-    if (this.connection !== this.c.connection) {
-      this.connection = this.c.connection;
+    if (this.connection !== this.c.codexConnection) {
+      this.connection = this.c.codexConnection;
       if (this.connection !== 'ready') { this.generation++; this.loading = false; }
     }
     if (this.cwd !== this.c.cwd) {
@@ -99,18 +100,19 @@ export class FolderSessions {
     const next = this.fingerprint();
     if (next === this.observed) return;
     this.observed = next;
-    if (this.visible && this.c.connection === 'ready') void this.refresh();
+    if (this.visible && this.c.codexConnection === 'ready') void this.refresh();
   };
 
   get snapshot() {
     this.sort();
-    const current = this.c.thread;
+    const current = this.c.codexThread;
     const rows: FolderSession[] = this.allThreads().filter(t => !t.ephemeral && !this.c.isArchived(t.id)
       && (t.name?.trim() || t.preview?.trim() || this.c.sessionHasContent(t.id)))
       .sort((a, b) => Number(this.c.isPinned(b.id)) - Number(this.c.isPinned(a.id)) || activityAt(b) - activityAt(a)).map(t => ({
       id: t.id, title: (t.name || t.preview || 'New session').replace(/\s+/g, ' ').slice(0, 240),
       titleRevision: this.c.sessionTitleRevision(t.id),
       updatedAt: t.updatedAt,
+      activityAt: activityAt(t),
       time: activityAt(t) ? this.timeFormat.format(new Date(activityAt(t) * 1000)) : '',
       locked: this.isLocked(t.id),
       pinned: this.c.isPinned(t.id),
@@ -121,8 +123,8 @@ export class FolderSessions {
     return { version: 1, cwd: this.cwd, current: current?.id ?? '', rows,
       loading: this.loading, error: this.error, more: !!this.cursor,
       blockedReason: this.c.selecting ? 'Opening session…' : '',
-      canSwitch: this.c.connection === 'ready' && !this.c.selecting,
-      connected: this.c.connection === 'ready', connecting: this.c.connection === 'connecting' };
+      canSwitch: this.c.codexConnection === 'ready' && !this.c.selecting,
+      connected: this.c.codexConnection === 'ready', connecting: this.c.codexConnection === 'connecting' };
   }
 
   contains(id: string) { return this.allThreads().some(t => t.id === id); }
@@ -130,7 +132,7 @@ export class FolderSessions {
   isLocked(id: string) {
     // Ownership may change after an asynchronous probe or a previous conflict.
     // Loaded background conversations must stay selectable, just like this one.
-    return id !== this.c.thread?.id && !this.c.rpc.ownsThread?.(id) && this.locked.has(id);
+    return id !== this.c.codexThread?.id && !this.c.rpc.ownsThread?.(id) && this.locked.has(id);
   }
   markLocked(id: string) {
     this.locked.add(id); this.conflicts.set(id, Date.now() + 15000);
@@ -167,7 +169,7 @@ export class FolderSessions {
     if (this.disposed) return Promise.resolve();
     this.visible = true;
     this.observe();
-    if (this.c.connection !== 'ready') return Promise.resolve();
+    if (this.c.codexConnection !== 'ready') return Promise.resolve();
     if (this.request?.generation === this.generation) {
       if (!more || this.request.more) return this.request.promise;
       if (this.moreRequest?.generation === this.generation) return this.moreRequest.promise;
@@ -231,7 +233,7 @@ export class FolderSessions {
         const retained = this.threads
           .filter(t => !this.c.isArchived(t.id)
             && (pinnedRows === undefined || !this.c.isPinned(t.id) || incoming.has(t.id))
-            && (more || cursor || incoming.has(t.id) || t.id === this.c.thread?.id))
+            && (more || cursor || incoming.has(t.id) || t.id === this.c.codexThread?.id))
           .map(t => incoming.get(t.id) ?? t);
         const added = [...incoming.values()].filter(t => !known.has(t.id));
         // Refresh follows backend activity order, including its tie order.

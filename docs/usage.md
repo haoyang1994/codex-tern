@@ -38,13 +38,17 @@ codex-tern setup
 
 Once the plugin is registered, the sessions sidebar opens automatically when the client starts. It reuses an existing sidebar and keeps focus in the composer. Closing it manually keeps it closed for that client run. To reopen it, use **Codex: Sessions** from Tern's command palette or run `codex-tern sessions` in the same Tern window. The sidebar shows sessions from the current folder, with activity times on hover. A spinner means a task is running; a bell means it needs input. A lock means another client owns that session. Locked rows cannot be selected and unlock automatically after the owner releases them.
 
-Click **New session** above the sidebar list to start a conversation in the current folder. The composer receives focus, and tasks and drafts in other sessions stay intact. You can also use **Ctrl+Shift+N** or the **+** at the lower right of the client.
+Click **New session** above the sidebar list or **+** in the composer and choose **Codex** or **omp**. Both engines use the same conversation pane and sidebar for the current folder. Use the sidebar or **Ctrl+L** to switch sessions. The composer receives focus, and tasks and drafts in other sessions stay with their conversations.
+
+Use `codex-tern --agent omp` to start a session or `codex-tern --agent omp --resume SESSION_ID` to open an existing one from its project. The CLI reuses an open project client. omp uses its configured model and its native confirmation flow. The chat supports text, streamed replies, tool activity, and stopping a turn. Codex's sandbox controls, model picker, forking, outline and message queue are available for Codex sessions.
 
 Drag the sidebar divider to choose its width. The proportion is saved globally in your Tern profile and shared by all projects and windows. New windows and reopened sidebars use that proportion, including after a restart. Resizing the whole window preserves your choice. Before your first adjustment, new sidebars use a comfortable default width.
 
 Right-click a session in the sidebar and choose **Delete session** to remove it from the list by moving it to Codex's archive. Running tasks, pending questions, queued messages and unsent drafts prevent deletion; choosing the action explains why it is unavailable. Deleting the selected session returns to an existing neighbour when available. Empty conversations stay out of history until their first message.
 
 The same right-click menu has **Rename session**. Enter a name and press **Enter** or **Save name**; **Esc** cancels. You can rename a background or running session without switching to it. Saved names appear in both the sidebar and history picker and persist in Codex. A rejected name keeps the dialog open with the error and leaves the stored title unchanged.
+
+Use the star on an omp row to pin or unpin it. Both engines sort pinned sessions first. Use **Archive session** on an omp row to hide it while keeping its saved conversation. **Archived omp sessions** expands a list with a **Restore session** button for each entry. Restoring returns the same session ID and its previous pin to the active list. Finish active work, answer any pending prompt and clear the draft before archiving.
 
 Sessions sort by last conversation activity, newest first. Sending a message or completing a task moves that session up, including background tasks. Opening an old session alone does not move it to the top. Refresh and pagination preserve this activity order.
 

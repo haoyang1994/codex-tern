@@ -7,7 +7,8 @@ import { IpcConnection, IpcServer, ipcEndpoint } from '@oh-my-pi/pi-natives';
 import { validPromptAnchor } from './prompt-anchor';
 import type { PromptAnchor } from './prompt-anchor';
 
-export interface ProjectCommand { version: 1; signature: string; resume?: string; prompt?: string; promptAnchor?: PromptAnchor }
+export interface ProjectCommand { version: 1; signature: string; agent?: 'omp'; cwd?: string; resume?: string; prompt?: string; promptAnchor?: PromptAnchor }
+export type ProjectReply = { ompId?: string };
 export interface ProjectInstance { close(): Promise<void> }
 
 /** Keep compatible rebuilds reusable, but never attach a new CLI to an older ABI. */
@@ -47,7 +48,7 @@ export async function projectAddress(cwd: string, namespace?: string) {
 function code(error: unknown) { return (error as NodeJS.ErrnoException).code ?? String(error).match(/\b(E[A-Z]+):/)?.[1]; }
 
 /** A lost reply must never cause a second submission of the same task. */
-export async function contactProject(address: string, command: ProjectCommand): Promise<boolean> {
+export async function contactProject(address: string, command: ProjectCommand, receive?: (reply: ProjectReply) => void): Promise<boolean> {
   let connection: IpcConnection;
   try { connection = await IpcConnection.connect(address, { framing: 'lines', timeoutMs: 1000, maxFrameBytes: 1024 * 1024 }); }
   catch (error) { if (['ENOENT', 'ECONNREFUSED'].includes(code(error) ?? '')) return false; throw error; }
@@ -62,6 +63,7 @@ export async function contactProject(address: string, command: ProjectCommand): 
     connection.start(line => {
       try {
         const reply = JSON.parse(line);
+        if (reply.ok) receive?.(reply);
         finish(reply.ok ? undefined : new Error(reply.error === legacySettingsError
           ? incompatibleProjectError : reply.error ?? 'Could not open the project'));
       } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
@@ -72,7 +74,7 @@ export async function contactProject(address: string, command: ProjectCommand): 
 
 /** Native binding atomically replaces stale sockets and checks peer ownership. */
 export async function serveProject(address: string, command: ProjectCommand,
-  handle: (command: ProjectCommand) => Promise<void>): Promise<ProjectInstance | null> {
+  handle: (command: ProjectCommand) => Promise<ProjectReply | void>, receive?: (reply: ProjectReply) => void): Promise<ProjectInstance | null> {
   const connections = new Set<IpcConnection>();
   let queue = Promise.resolve();
   let server: IpcServer;
@@ -81,8 +83,8 @@ export async function serveProject(address: string, command: ProjectCommand,
       connections.add(connection);
       let accepted = false;
       const timer = setTimeout(() => connection.destroy(), 60000);
-      const reply = (error?: unknown) => {
-        connection.send(JSON.stringify(error ? { ok: false, error: error instanceof Error ? error.message : String(error) } : { ok: true }));
+      const reply = (error?: unknown, result?: ProjectReply | void) => {
+        connection.send(JSON.stringify(error ? { ok: false, error: error instanceof Error ? error.message : String(error) } : { ok: true, ...result }));
         connection.end();
       };
       connection.start(line => {
@@ -91,19 +93,21 @@ export async function serveProject(address: string, command: ProjectCommand,
         let request: ProjectCommand;
         try {
           request = JSON.parse(line);
-          if (request.version !== 1 || request.signature !== command.signature
+          const omp = request.agent === 'omp' && typeof request.cwd === 'string'
+            && !request.promptAnchor && request.prompt === undefined;
+          if (request.version !== 1 || (!omp && (request.agent !== undefined || request.signature !== command.signature))
             || (request.resume !== undefined && typeof request.resume !== 'string')
             || (request.promptAnchor !== undefined && (!validPromptAnchor(request.promptAnchor) || request.promptAnchor.threadId!==request.resume))
             || (request.prompt !== undefined && typeof request.prompt !== 'string'))
             throw new Error(incompatibleProjectError);
         } catch (error) { reply(error); return; }
         const work = queue.then(() => handle(request));
-        queue = work.catch(() => {});
-        void work.then(() => reply(), reply);
+        queue = work.then(() => {}, () => {});
+        void work.then(result => reply(undefined, result), reply);
       }, () => { clearTimeout(timer); connections.delete(connection); });
     });
   } catch (error) {
-    if (code(error) === 'EADDRINUSE' && await contactProject(address, command)) return null;
+    if (code(error) === 'EADDRINUSE' && await contactProject(address, command, receive)) return null;
     throw error;
   }
   return { close: async () => {

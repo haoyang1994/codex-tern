@@ -311,6 +311,26 @@ createInterface({ input: process.stdin }).on('line', async line => {
         if (process.env.QA_PROGRESS_RELEASE_FILE) {
           const timer = setInterval(() => { if (existsSync(process.env.QA_PROGRESS_RELEASE_FILE)) { clearInterval(timer); done(); } }, 25);
         } else setTimeout(done, 1500);
+      } else if (process.env.QA_REASONING_GATES && text === 'QA_REASONING_FIXTURE') {
+        const summary = [
+          '**核对待清理的产物**\n\n确认配置路径与历史记录。This paragraph mixes 中文 and English and should wrap cleanly in a narrow pane.',
+          '**Checking native file origins**',
+          '### 下一步 / Next steps\n\n- 核对记录\n- Confirm the `fixture` result',
+        ];
+        const item = { id: 'public-reasoning', type: 'reasoning', summary: [], content: ['QA_PRIVATE_REASONING'] };
+        add(item, false);
+        const timer = setInterval(() => {
+          if (!existsSync(join(process.env.QA_REASONING_GATES, 'stream'))) return;
+          clearInterval(timer);
+          summary.forEach((delta, summaryIndex) => event('item/reasoning/summaryTextDelta', { itemId: item.id, summaryIndex, delta }));
+          const finishTimer = setInterval(() => {
+            if (!existsSync(join(process.env.QA_REASONING_GATES, 'finish'))) return;
+            clearInterval(finishTimer);
+            add({ ...item, summary });
+            add({ id: 'empty-reasoning', type: 'reasoning', summary: ['', ' \n '], content: ['QA_PRIVATE_EMPTY'] });
+            finish('QA_REASONING_FINAL 正式回复维持独立的 Markdown 排版。');
+          }, 25);
+        }, 25);
       } else if (text.includes('QA_PROGRESS_FIXTURE')) {
         add({ id: 'progress-one', type: 'agentMessage', phase: 'commentary', text: 'QA_PROGRESS_1 进度1：读取配置。' });
         add({ id: 'progress-command-one', type: 'commandExecution', command: 'echo QA_COMMAND_ONE', cwd: process.cwd(), status: 'completed', exitCode: 0, aggregatedOutput: 'QA_TOOL_OUTPUT_ONE' });

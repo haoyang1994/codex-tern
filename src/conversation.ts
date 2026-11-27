@@ -20,7 +20,7 @@ export interface DisplayItem {
   delivery?: 'sending' | 'accepted';
 }
 export interface PendingRequest { id: RpcId; method: string; params: any; answers: Record<string, string[]> }
-export interface QueuedInput { id: string; text: string; images: string[]; skills?: SkillInput[] }
+export interface QueuedInput { id: string; text: string; images: string[]; skills?: SkillInput[]; nativeDelivery?: boolean }
 export interface Notice { id: number; text: string; error: boolean }
 
 /** Disposable view state. Codex owns history, config, permissions and execution. */

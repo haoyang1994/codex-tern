@@ -23,10 +23,16 @@ end
 function outline.target(pane) return panels[pane] and panels[pane].target end
 function outline.closed(pane) panels[pane] = nil end
 
+local function view_for(snapshot, entry)
+  local view = toc.view(snapshot, entry)
+  if view then return view end
+  local note = if snapshot.showingOmp then "Session TOC is available for Codex." else "Open a session to see its TOC."
+  return {k = "text", p = {role = "codex-tern.toc.note", text = t(note)}}
+end
+
 local function paint(cx, pane, entry, snapshot)
   language = snapshot.language or "en"
-  local view = toc.view(snapshot, entry)
-  if not view then view = {k = "text", p = {role = "codex-tern.toc.note", text = t("Open a session to see its TOC.")}} end
+  local view = view_for(snapshot, entry)
   if tern.json.encode(view) ~= entry.view then
     cx.canvas:set(pane, {view = view}); entry.view = tern.json.encode(view)
   end
@@ -66,7 +72,7 @@ function outline.open(cx, target, neighbour, state)
     end
   end
   local entry = {target = target}
-  local view = toc.view(state.snapshot, entry) or {k = "text", p = {role = "codex-tern.toc.note", text = t("Open a session to see its TOC.")}}
+  local view = view_for(state.snapshot, entry)
   local pane, err = cx.canvas:open({title = t("Session TOC"), view = view, about = PREFIX .. tostring(target), how = "below", focus = false})
   if not pane then cx:toast("error", "Could not open session TOC", err); return end
   cx.layout:move(pane, neighbour or target, "down", {focus = false})

@@ -15,6 +15,7 @@ local width_timer = nil
 local fast_until = 0
 local following_outline = false
 local selection_seq = 0
+local focused_tab = nil
 
 local function bridge(cx, target)
   local ok, tree = pcall(function()
@@ -49,6 +50,7 @@ end
 local function paint(cx, pane, entry, snapshot)
   local versions, reveals = {}, {}
   for _, item in snapshot.rows do
+    if item.source == "omp" then continue end
     versions[item.id] = item.titleRevision or ""
     -- Opening or restoring a panel establishes a baseline without replaying effects.
     local previous = entry.title_versions and entry.title_versions[item.id]
@@ -59,10 +61,13 @@ local function paint(cx, pane, entry, snapshot)
   end
   entry.title_versions = versions
   entry.title_reveals = reveals
+  local frame = tern.json.encode({snapshot = snapshot, selection = entry.selection, reveals = reveals, showArchived = entry.showArchived})
+  if frame == entry.frame then return true end
   local surface = cx.session:surface(pane)
   if surface and surface.surface then
     cx.session:event(pane, {sf = surface.surface.id, ev = "action", act = "sync",
-      value = tern.json.encode({snapshot = snapshot, selection = entry.selection, reveals = reveals})})
+      value = frame})
+    entry.frame = frame
     return true
   end
   return false
@@ -104,6 +109,7 @@ local function update(cx, pane, entry)
       -- The closed placeholder replaced the list, even if recovery later loads
       -- an identical snapshot. The next live frame must rebuild that list.
       entry.view = nil
+      entry.frame = nil
       entry.selection = nil
       entry.title_versions = nil
       entry.title_reveals = nil
@@ -172,8 +178,9 @@ local function watch_widths()
       -- Tern caches tab titles, so know the conversation's label before a
       -- sidebar card is ever focused rather than learning it from the hook.
       for _, entry in panels do
-        local info = cx.session:pane(entry.target)
-        if info and info.title and info.title ~= "" then conversation_titles[entry.target] = info.title end
+        local target = entry.target
+        local info = cx.session:pane(target)
+        if info and info.title and info.title ~= "" then conversation_titles[target] = info.title end
       end
     end
     watch_widths()
@@ -216,6 +223,56 @@ local function open(cx, automatic_target)
   send(cx, target, "refresh")
   poll(true)
 end
+
+local function start_codex(cx, target, state)
+  if not state or not state.snapshot.canSwitch then
+    cx:toast("info", t("Wait for the Codex session to finish connecting."))
+    return
+  end
+  if state.snapshot.newSessionProtocol == 1 then
+    send(cx, target, "new")
+  else
+    cx.session:event(target, {sf = state.sf, ev = "action", id = "dock.nav.new", act = "click"})
+  end
+  cx.layout:focus(target)
+  poll(true)
+end
+
+local function choose_engine(cx, entry, snapshot)
+  if not snapshot.ompAvailable or cx.hosts:current().kind ~= "local" then
+    start_codex(cx, entry.target, bridge(cx, entry.target))
+    return
+  end
+  local cwd = snapshot.cwd
+  cx:pick({placeholder = t("Choose a session engine"), icon = "plus", action = t("New session"), items = {
+    {label = "Codex", icon = "app-codex", engine = "codex"},
+    {label = "omp", icon = "app-omp", engine = "omp"},
+  }}):next(function(choice, err, next_cx)
+    if not next_cx or not choice or err then return end
+    local state = bridge(next_cx, entry.target)
+    if not state or state.snapshot.cwd ~= cwd or state.snapshot.selecting then return end
+    if choice.engine == "codex" then
+      start_codex(next_cx, entry.target, state)
+    elseif choice.engine == "omp" then
+      send(next_cx, entry.target, "omp-new")
+      next_cx.layout:focus(entry.target)
+      poll(true)
+    end
+  end)
+end
+
+tern.command({id = "new-session", title = "Codex: New session", icon = "plus", run = function(cx)
+  for _, pane in cx.session:panes() do
+    local target = pane.pane
+    local state = bridge(cx, target)
+    if state and state.snapshot.newSessionRequest then choose_engine(cx, {target = target}, state.snapshot); return end
+  end
+  local focused = cx.session:focused()
+  local entry = focused and panels[focused]
+  local state = focused and bridge(cx, focused)
+  if entry and entry.snapshot then choose_engine(cx, entry, entry.snapshot)
+  elseif state then choose_engine(cx, {target = focused}, state.snapshot) end
+end})
 
 tern.command({id = "sessions", title = "Codex: Sessions", icon = "history", run = function(cx)
   -- Startup requests identify their client explicitly, even if focus changed
@@ -260,7 +317,7 @@ tern.command({id = "reading-position", title = "Codex: Reading position", availa
         reading.restore(cx, pane.pane, request, function(cx)
           local latest = bridge(cx, pane.pane)
           return latest and latest.snapshot.readingRequest and latest.snapshot.readingRequest.token == request.token
-            and (not request.threadId or latest.snapshot.current == request.threadId)
+            and (not request.threadId or (latest.snapshot.activeKey or latest.snapshot.current) == request.threadId)
         end, done)
       end
     end
@@ -290,13 +347,33 @@ local function session_action(ev, cx)
   remember(cx)
   local entry = panels[ev.pane]
   if not entry then return true end
-  bridge(cx, entry.target)
-  if ev.act == "resume" and ev.value then
-    local state = bridge(cx, entry.target)
+  local state = bridge(cx, entry.target)
+  if ev.act == "omp-archives" and state then
+    entry.showArchived = not entry.showArchived
+    paint(cx, ev.pane, entry, state.snapshot)
+  elseif ev.act == "omp-archive-disabled" then
+    cx:toast("info", t("Finish this session’s task, pending input and draft before archiving."))
+  elseif state and state.snapshot.ompAvailable and ev.value and
+    (ev.act == "omp-resume" or ev.act == "omp-pin" or ev.act == "omp-archive" or ev.act == "omp-restore") then
+    local restoring = ev.act == "omp-restore"
+    local rows = if restoring then state.snapshot.ompArchived else state.snapshot.rows
+    for _, row in rows or {} do
+      if row.id == ev.value and (restoring or row.source == "omp") then
+        if ev.act == "omp-archive" and not row.canArchive then
+          cx:toast("info", t("Finish this session’s task, pending input and draft before archiving."))
+        elseif not state.snapshot.selecting then
+          send(cx, entry.target, ev.act, row.id)
+          if ev.act == "omp-resume" or ev.act == "omp-archive" then cx.layout:focus(entry.target) end
+          poll(true)
+        end
+        break
+      end
+    end
+  elseif ev.act == "resume" and ev.value then
     if state then
       local found = false
       for _, row in state.snapshot.rows do
-        if row.id == ev.value and not row.locked then found = true; break end
+        if row.source ~= "omp" and row.id == ev.value and not row.locked then found = true; break end
       end
       if found then
         selection_seq += 1
@@ -313,30 +390,20 @@ local function session_action(ev, cx)
       end
     end
   elseif ev.act == "pin" and ev.value then
-    local state = bridge(cx, entry.target)
     if state and state.snapshot.pinProtocol == 1 then
       for _, row in state.snapshot.rows do
-        if row.id == ev.value then send(cx, entry.target, "pin", row.id); poll(true); break end
+        if row.source ~= "omp" and row.id == ev.value then send(cx, entry.target, "pin", row.id); poll(true); break end
       end
     end
-  elseif ev.act == "new" then
-    local state = bridge(cx, entry.target)
-    if state and state.snapshot.canSwitch then
-      -- New clients route through the stable bridge, independent of toolbar layout.
-      -- Keep the old button route for clients already running before this update.
-      if state.snapshot.newSessionProtocol == 1 then
-        send(cx, entry.target, "new")
-      else
-        cx.session:event(entry.target, {sf = state.sf, ev = "action", id = "dock.nav.new", act = "click"})
-      end
-      cx.layout:focus(entry.target)
-      poll(true)
-    end
+  elseif ev.act == "new" and entry.snapshot then
+    choose_engine(cx, entry, entry.snapshot)
+  elseif ev.act == "refresh" then
+    if state then send(cx, entry.target, "refresh") end
+    poll(true)
   elseif (ev.act == "Rename session" or ev.act == t("Rename session")) then
-    local state = bridge(cx, entry.target)
     if state then
       for _, row in state.snapshot.rows do
-        if ev.node == "main.sessions." .. row.id then
+        if ev.node == "main.sessions.codex:" .. row.id then
           if state.snapshot.renameProtocol ~= 1 then
             cx:toast("info", "Exit the Codex client with Ctrl+Q, then run codex-tern again to enable renaming sessions.")
           elseif not state.snapshot.canSwitch then
@@ -351,12 +418,11 @@ local function session_action(ev, cx)
       end
     end
   elseif (ev.act == "Delete session" or ev.act == t("Delete session")) or (ev.act == "archive" and ev.value) then
-    local state = bridge(cx, entry.target)
     if state then
       for _, row in state.snapshot.rows do
         -- Menu labels stay readable; the keyed node identifies the clicked row.
-        if ((ev.act == "Delete session" or ev.act == t("Delete session")) and ev.node == "main.sessions." .. row.id)
-          or (ev.act == "archive" and ev.value == row.id) then
+        if row.source ~= "omp" and (((ev.act == "Delete session" or ev.act == t("Delete session")) and ev.node == "main.sessions.codex:" .. row.id)
+          or (ev.act == "archive" and ev.value == row.id)) then
           if state.snapshot.archiveProtocol ~= 1 then
             cx:toast("info", "Exit the Codex client with Ctrl+Q, then run codex-tern again to enable deleting sessions.")
           elseif row.locked then
@@ -373,11 +439,10 @@ local function session_action(ev, cx)
       end
     end
   elseif ev.act == "archive-disabled" then
-    local state = bridge(cx, entry.target)
     cx:toast("info", if state and state.snapshot.archiveProtocol == 1
       then t("Finish this session's task, answers, queue and draft before deleting.")
       else "Exit the Codex client with Ctrl+Q, then run codex-tern again to enable deleting sessions.")
-  elseif ev.act == "more" then send(cx, entry.target, "more"); poll(true) end
+  elseif ev.act == "more" and state then send(cx, entry.target, "more"); poll(true) end
   -- Always consume owned clicks, including stale ones.
   return true
 end
@@ -409,11 +474,28 @@ tern.on("pane_closed", function(ev, cx)
   local key = "sessions.block:" .. ev.pane
   local record = tern.kv.get(key)
   if record then record.closed = true; tern.kv.set(key, record) end
-  if entry then send(cx, entry.target, "hide"); panels[ev.pane] = nil end
+  if entry then
+    panels[ev.pane] = nil
+    local retained = false
+    for _, other in panels do if other.target == entry.target then retained = true; break end end
+    if not retained then send(cx, entry.target, "hide") end
+  end
   if next(panels) == nil then
     if width_timer then width_timer:cancel(); width_timer = nil end
     if timer and not outline.any() then timer:cancel(); timer = nil end
   end
+end)
+
+tern.on("focus", function(ev, cx)
+  if focused_tab == ev.tab then return end
+  focused_tab = ev.tab
+  for pane, entry in panels do
+    if cx.session:tab_of(pane) == ev.tab then
+        send(cx, entry.target, "refresh")
+      update(cx, pane, entry)
+    end
+  end
+  poll(true)
 end)
 
 local function restore(cx)

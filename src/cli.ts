@@ -1,8 +1,10 @@
-import { stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, basename, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createInterface } from 'node:readline';
-import { HELP, VERSION, nativeArgs, parseOptions } from './options';
+import { HELP, VERSION, nativeArgs, parseOptions, type Options } from './options';
 import { findExecutable, openTern, focusClient } from './launch';
 import { CodexRpc } from './rpc';
 import { Controller } from './controller';
@@ -10,13 +12,44 @@ import { parseCommand, commandHelp } from './commands';
 import { isLanguage } from './i18n';
 import { RecoveryStore, recoveryPath } from './recovery';
 import { Preferences, preferencesPath } from './preferences';
-import type { ProjectInstance, ProjectCommand } from './project-instance';
+import type { ProjectInstance, ProjectCommand, ProjectReply } from './project-instance';
 import { attachWeixinOwner, type WeixinOwner } from './weixin-owner';
 import { installChiefGuard } from './weixin-chief-guard';
 import type { PromptAnchor } from './prompt-anchor';
+import { writeOmpJson } from './omp-session';
+
+function reportOmp(reply: ProjectReply) {
+  if (!reply.ompId) throw new Error('The open codex-tern pane needs a restart to accept omp sessions.');
+  console.log(`omp session ID verified: ${reply.ompId}`);
+}
+
+async function launchOmp(options: Options, codex: string) {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-tern-omp-'));
+  const file = join(dir, 'result.json');
+  try {
+    let failure: Error | undefined;
+    void openTern(fileURLToPath(import.meta.url), nativeArgs({ ...options, ompStartupReceipt: file }, codex), options.cwd, true)
+      .then(code => { if (code !== 0) failure = new Error(`Tern could not open codex-tern (status ${code}).`); }, error => { failure = error; });
+    const deadline = Date.now() + 42000;
+    while (Date.now() < deadline) {
+      if (failure) throw failure;
+      const response = await readFile(file, 'utf8').catch(error => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+      if (response) {
+        const result = JSON.parse(response);
+        if (result.error) throw new Error(result.error);
+        reportOmp(result); return;
+      }
+      await delay(100);
+    }
+    throw new Error('Tern did not confirm the omp session in time. Check the pane before retrying.');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
 
 async function main() {
-  const options = parseOptions(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  const options = parseOptions(args);
   if (options.native) Object.assign(process.env, options.runtimeEnv);
   if (options.help) { console.log(HELP); return; }
   if (options.version) { console.log(VERSION); return; }
@@ -26,16 +59,30 @@ async function main() {
   }
   if (!(await stat(options.cwd).catch(() => null))?.isDirectory())
     throw new Error(`Project directory does not exist or is not a directory: ${options.cwd}`);
+  const omp = options.agent === 'omp';
   const binary = options.codex ?? process.env.CODEX_BINARY ?? 'codex';
-  const codex = findExecutable(binary);
-  if (!codex) throw new Error(`Codex executable was not found: ${binary}. Install the official Codex CLI and sign in with codex login, or use --codex /path/to/codex.`);
+  const codex = findExecutable(binary) ?? binary;
+  if (!omp && !findExecutable(codex)) throw new Error(`Codex executable was not found: ${binary}. Install the official Codex CLI and sign in with codex login, or use --codex /path/to/codex.`);
   const projects = options.plain ? null : await import('./project-instance');
   const address = projects ? await projects.projectAddress(options.cwd) : undefined;
   const command: ProjectCommand = { version: 1, signature: projects?.projectSignature(codex, options.config) ?? '',
+    ...(omp ? { agent: 'omp', cwd: options.cwd } : {}),
     ...(options.resume ? { resume: options.resume } : {}),
     ...(options.promptAnchor ? { promptAnchor: options.promptAnchor } : {}),
     ...(options.prompt !== undefined ? { prompt: options.prompt } : {}) };
-  if (projects && address && await projects.contactProject(address, command)) return;
+  const report = omp ? (reply: ProjectReply) => {
+    if (options.ompStartupReceipt) return;
+    reportOmp(reply);
+  } : undefined;
+  const receipt = async (reply: ProjectReply | { error: string }) => {
+    if (options.ompStartupReceipt) await writeOmpJson(options.ompStartupReceipt, reply);
+  };
+  let reused: ProjectReply | undefined;
+  const receive = omp ? (reply: ProjectReply) => { reused = reply; report?.(reply); } : undefined;
+  if (projects && address && await projects.contactProject(address, command, receive)) {
+    if (reused) await receipt(reused);
+    return;
+  }
   const rpc = new CodexRpc({ binary: codex, cwd: options.cwd,
     args: ['-c', 'approval_policy="on-request"', '-c', 'approvals_reviewer="auto_review"',
       ...options.config.flatMap(value => ['-c', value])] });
@@ -50,13 +97,14 @@ async function main() {
     shuttingDown = true; c.connection = 'disconnected';
     // Keep the project lease until the final journal is saved. A new client
     // must not read an older snapshot while this backend is still closing.
-    try { await weixinAttach; await weixinOwner?.close(); await c.promptTree.close(); await rpc.close(); await c.flushRecovery(); await c.flushOutlines(); }
+    try { await weixinAttach; await weixinOwner?.close(); await c.closeOmp(); await c.promptTree.close(); await rpc.close(); await c.flushRecovery(); await c.flushOutlines(); }
     finally { await instance?.close(); }
   };
   try {
     const ui = options.plain ? null : await (await import('./native-host')).createNativeUI(c);
     if (!ui && !options.plain) {
       if (options.native) throw new Error('Tern native UI is unavailable. Run directly in a Tern pane without tmux, screen or zellij, or use --plain.');
+      if (omp) { await launchOmp(options, codex); return; }
       process.exitCode = await openTern(fileURLToPath(import.meta.url), nativeArgs(options, codex), options.cwd);
       return;
     }
@@ -67,13 +115,19 @@ async function main() {
         const target = await projects.projectAddress(cwd);
         const request: ProjectCommand = { version: 1, signature: command.signature, resume, prompt, promptAnchor };
         if (await projects.contactProject(target, request)) return true;
-        return await openTern(fileURLToPath(import.meta.url), nativeArgs({ ...options, cwd, resume, prompt, promptAnchor }, codex), cwd) === 0;
+        return await openTern(fileURLToPath(import.meta.url), nativeArgs({ ...options, agent: 'codex', ompStartupReceipt: undefined, cwd, resume, prompt, promptAnchor }, codex), cwd) === 0;
       };
       ui.openProject = (cwd, resume, anchor) => openProject(cwd, resume, undefined, anchor);
       instance = await projects.serveProject(address, command, async request => {
         await started;
-        if (shuttingDown || c.connection !== 'ready' || !c.thread) throw new Error('The project is not connected.');
+        if (shuttingDown) throw new Error('The project is closing.');
         await focusClient();
+        if (request.agent === 'omp') {
+          if (!request.cwd || await projects.projectAddress(request.cwd) !== address)
+            throw new Error('This omp request belongs to another project.');
+          return { ompId: await ui.openOmp(request.resume, request.cwd) };
+        }
+        if (c.codexConnection !== 'ready' || !c.codexThread) throw new Error('Codex is not connected.');
         if (request.resume) {
           if (!rpc.ownsThread(request.resume)) {
             const result = await rpc.request('thread/read', { threadId: request.resume, includeTurns: false });
@@ -83,25 +137,37 @@ async function main() {
             }
           }
           if (!await (request.promptAnchor ? ui.openPrompt(request.promptAnchor) : ui.openSession(request.resume))) throw new Error('This session is unavailable or open in another client.');
-        } else if (request.prompt !== undefined && !await ui.newSession()) throw new Error('Could not create a session.');
+        } else if (request.prompt !== undefined) {
+          if (!await ui.newSession()) throw new Error('Could not create a session.');
+        } else if (c.engine === 'omp' && !await ui.openSession(c.codexThread.id)) {
+          throw new Error('The Codex session is unavailable.');
+        }
         if (request.prompt !== undefined) await c.submit(request.prompt);
-      });
-      if (!instance) { await ui.close(); return; }
+      }, receive);
+      if (!instance) { if (reused) await receipt(reused); await ui.close(); return; }
       try { c.useRecovery(await RecoveryStore.open(recoveryPath(address))); }
       catch (error) { c.notice((error as Error).message, true); }
       const recoveryFile = recoveryPath(address);
       c.useOutlines(join(dirname(dirname(recoveryFile)), 'outlines', basename(recoveryFile, '.json')));
     }
     // Never await backend work in the UI input loop: approvals and cancellation stay live.
-    const connection = c.connect(options.resume, options.prompt !== undefined, !options.promptAnchor).then(async () => {
+    const launch = async () => {
+      if (ui && omp) {
+        try { await receipt({ ompId: await ui.openOmp(options.resume) }); }
+        catch (error) { await receipt({ error: (error as Error).message }); }
+      }
+      await c.connect(omp ? undefined : options.resume, options.prompt !== undefined, !options.promptAnchor);
+    };
+    const connection = launch().then(async () => {
       if (ui && options.promptAnchor) { await focusClient(); await ui.openPrompt(options.promptAnchor); }
       if (options.prompt !== undefined) await c.submit(options.prompt);
     }).catch(e => {
-      c.notice(e.message, true); c.connection = rpc.connected ? 'ready' : 'disconnected'; c.changed();
+      if (c.engine === 'codex') c.notice(e.message, true);
+      c.connection = rpc.connected ? 'ready' : 'disconnected'; c.changed();
     }).finally(ready);
     const sidebar = ui?.openSidebar().catch(error => c.notice(error.message, true));
     if (ui) weixinAttach = connection.then(async () => {
-      if (!shuttingDown && c.connection === 'ready') weixinOwner = await attachWeixinOwner(c, () => ui.current.sendMode);
+      if (!shuttingDown && c.codexConnection === 'ready') weixinOwner = await attachWeixinOwner(c, () => ui.current.sendMode);
     });
     if (ui) {
       await ui.run();

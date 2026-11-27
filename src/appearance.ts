@@ -134,6 +134,37 @@ export const appearanceStyles = css`
   }
   .sf.sf-col[data-role="omp.assistant"] > .sf-md,
   .sf.sf-card[data-role="omp.user"] .sf-md { gap: 12px; }
+  .sf.sf-section:is([data-role="omp.thinking"], [data-role="omp.thinking.live"]) {
+    width: 100%;
+    max-width: 736px;
+    margin-left: auto;
+    margin-right: auto;
+    > .sf-section-head {
+      margin: 0;
+      padding: 0;
+      min-height: var(--sf-grid-lh);
+      font-family: var(--ct-prose);
+      font-size: var(--sf-fs);
+      line-height: var(--sf-grid-lh);
+      color: var(--t3);
+    }
+    > .sf-section-body {
+      align-self: stretch;
+      margin: 4px 0 0;
+      padding: 0 0 0 12px;
+      box-shadow: inset 1px 0 0 var(--l2);
+      color: var(--t2);
+      font-style: normal;
+    }
+    > .sf-section-body > .sf-md {
+      gap: 8px;
+      font: var(--sf-fs)/1.5 var(--ct-prose);
+      overflow-wrap: anywhere;
+    }
+    > .sf-section-body > .sf-md .md { color: inherit; }
+    > .sf-section-body > .sf-md .md > p { margin: 0; }
+    > .sf-section-body > .sf-md .md > p + p { margin-top: 8px; }
+  }
   /* Message actions float below the reply and appear on hover, as in Claude Code. */
   .sf.sf-row[data-role="ct.reply.actions"] {
     position: absolute;

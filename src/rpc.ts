@@ -11,7 +11,7 @@ export class RpcError extends Error {
 /** A written request may have taken effect even though no usable reply arrived. */
 export class RpcOutcomeUnknown extends Error {
   override readonly name = 'RpcOutcomeUnknown';
-  constructor(readonly method: Method | 'server-request/respond', readonly requestId: RpcId, message: string) { super(message); }
+  constructor(readonly method: Method | 'server-request/respond' | 'omp/prompt', readonly requestId: RpcId, message: string) { super(message); }
 }
 
 /** Reloaded UI bundles have their own constructors; the transport stays alive. */

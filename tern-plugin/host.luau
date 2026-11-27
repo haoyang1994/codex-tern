@@ -35,7 +35,7 @@ tern.block.define("sessions", {
   title = function(state) return translate(state.snapshot and state.snapshot.language, "Sessions") end,
   view = function(state, cx)
     emit("view", {pane = cx.pane, lit = state.lit, running = state.running})
-    local content = if state.snapshot then view(state.snapshot, state.selection, state.reveals, state.lit)
+    local content = if state.snapshot then view(state.snapshot, state.selection, state.reveals, state.lit, state.showArchived)
       else tern.ui.text(translate(state.language, if state.closed then "The Codex client is closed." else "Loading…"))
     -- Keep the original main.sessions.<row> action IDs, native diff and scroll keys.
     return {main = tern.ui.col({content})}
@@ -47,7 +47,7 @@ tern.block.define("sessions", {
       if not ok or type(data) ~= "table" then return end
       if data.snapshot and (data.snapshot.version ~= 1 or type(data.snapshot.rows) ~= "table") then return end
       state.snapshot, state.selection, state.reveals = data.snapshot, data.selection, data.reveals
-      state.closed, state.language = data.closed, data.language
+      state.closed, state.language, state.showArchived = data.closed, data.language, data.showArchived
       state.running = running(state.snapshot); heartbeat.changed(cx.pane)
       emit("sync", {pane = cx.pane, running = state.running})
     else

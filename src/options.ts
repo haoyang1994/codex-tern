@@ -24,6 +24,7 @@ Options:
   -C, --cd PATH           Use PATH as the project directory (default: current directory)
       --cwd PATH          Alias for --cd
       --resume THREAD_ID  Resume a saved session
+      --agent ENGINE     codex (default) or omp. omp uses the same codex-tern chat in Tern
       --codex PATH        Use a specific Codex executable (or set CODEX_BINARY)
   -c, --config key=value  Forward an explicit setting to codex app-server; repeatable
       --plain             Run the text client in this terminal
@@ -42,8 +43,9 @@ Tested with Codex CLI 0.162.1, Tern 0.9.5 and Tern SDK 0.1.0.
 export function parseOptions(args: string[], cwd = process.cwd()) {
   const { values, positionals, tokens } = parseArgs({ args, allowPositionals: true, tokens: true, options: {
     cd: { type: 'string', short: 'C' }, cwd: { type: 'string' },
-    codex: { type: 'string' }, resume: { type: 'string' },
+    codex: { type: 'string' }, resume: { type: 'string' }, agent: { type: 'string' },
     'prompt-anchor': { type: 'string' },
+    'omp-startup-receipt': { type: 'string' },
     'runtime-env': { type: 'string' },
     config: { type: 'string', short: 'c', multiple: true },
     plain: { type: 'boolean' }, native: { type: 'boolean' },
@@ -56,7 +58,7 @@ export function parseOptions(args: string[], cwd = process.cwd()) {
   const terminator = tokens.find(token => token.kind === 'option-terminator');
   if (['setup', 'sessions', 'reload'].includes(positionals[0]) && (!terminator || firstPositional!.index < terminator.index)) {
     command = positionals.shift() as 'setup' | 'sessions' | 'reload';
-    if (positionals.length || resume || values.config?.length || values.plain || values.native)
+    if (positionals.length || resume || values.config?.length || values.plain || values.native || values.agent)
       throw new Error(`Usage: codex-tern ${command}`);
   }
   if (positionals[0] === 'resume' && (!terminator || firstPositional!.index < terminator.index)) {
@@ -66,6 +68,12 @@ export function parseOptions(args: string[], cwd = process.cwd()) {
     if (!resume && !values.help && !values.version) throw new Error('Usage: codex-tern resume THREAD_ID');
   }
   if (positionals.length > 1) throw new Error('Put the prompt in quotes: codex-tern "your task"');
+  const agent = values.agent ?? 'codex';
+  if (agent !== 'codex' && agent !== 'omp') throw new Error('Use --agent codex or --agent omp.');
+  if (agent === 'omp' && (positionals.length || values.plain || (!values.native && (values.codex || values.config?.length)) || values['prompt-anchor']))
+    throw new Error('For omp use codex-tern [--cd PATH] --agent omp [--resume SESSION_ID], then enter messages in Tern.');
+  const ompStartupReceipt = values['omp-startup-receipt'];
+  if (ompStartupReceipt && (agent !== 'omp' || !values.native)) throw new Error('Invalid omp startup receipt.');
   let promptAnchor: PromptAnchor | undefined;
   if (values['prompt-anchor']) {
     const value: unknown = JSON.parse(values['prompt-anchor']);
@@ -73,8 +81,8 @@ export function parseOptions(args: string[], cwd = process.cwd()) {
     promptAnchor = value;
   }
   // Tern's daemon starts new panes from its own environment. Carry only the
-  // directory settings that identify this client's history and private cache.
-  const environmentNames = ['CODEX_HOME','XDG_STATE_HOME','XDG_CACHE_HOME'];
+  // settings for this client's history, cache and omp profile.
+  const environmentNames = ['CODEX_HOME','XDG_STATE_HOME','XDG_CACHE_HOME','OMP_BINARY','PI_CODING_AGENT_DIR','OMP_PROFILE'];
   const runtimeEnv: Record<string,string> = values['runtime-env'] ? JSON.parse(values['runtime-env'])
     : Object.fromEntries(environmentNames.flatMap(key => process.env[key] ? [[key,process.env[key]!]] : []));
   if (!runtimeEnv || Array.isArray(runtimeEnv) || typeof runtimeEnv!=='object'
@@ -82,7 +90,7 @@ export function parseOptions(args: string[], cwd = process.cwd()) {
     throw new Error('Invalid client directory settings.');
   return {
     cwd: resolve(cwd, values.cd ?? values.cwd ?? '.'), codex: values.codex,
-    command, resume, promptAnchor, runtimeEnv, config: values.config ?? [], prompt: positionals.at(0),
+    command, agent, resume, promptAnchor, runtimeEnv, ompStartupReceipt, config: values.config ?? [], prompt: positionals.at(0),
     plain: values.plain ?? false, native: values.native ?? false,
     help: values.help ?? false, version: values.version ?? false,
   };
@@ -93,6 +101,8 @@ export type Options = ReturnType<typeof parseOptions>;
 /** Absolute paths survive the change from the caller's shell to a Tern pane. */
 export function nativeArgs(options: Options, codex: string) {
   return ['--native', '--cwd', options.cwd, '--codex', codex,
+    ...(options.agent === 'omp' ? ['--agent', 'omp'] : []),
+    ...(options.ompStartupReceipt ? ['--omp-startup-receipt', options.ompStartupReceipt] : []),
     ...(options.resume ? ['--resume', options.resume] : []),
     ...(options.promptAnchor ? ['--prompt-anchor',JSON.stringify(options.promptAnchor)] : []),
     ...(Object.keys(options.runtimeEnv).length ? ['--runtime-env',JSON.stringify(options.runtimeEnv)] : []),

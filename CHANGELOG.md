@@ -2,6 +2,17 @@
 
 Notable changes, newest first. This log starts with the update below.
 
+## 2026-11-27
+
+### Added
+
+- Start and resume omp sessions in the same chat pane as Codex. The shared sidebar shows both engines, with omp pinning, archiving and restoration.
+
+### Changed
+
+- Show monochrome engine icons on the left of session rows. The ChatGPT icon uses a muted gray in dark mode.
+- Render Codex thought summaries as readable Markdown while they stream and when reopening history.
+
 ## 2026-11-12
 
 ### Changed

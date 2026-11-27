@@ -192,9 +192,13 @@ try {
     maxGapMs: Math.max(...gaps), receiptMaxGapMs: Math.max(...receipts), maxLateMs: Math.max(...ticks.map(e => e.late))};
   assert(evidence.timing.maxGapMs < 900 && evidence.timing.receiptMaxGapMs < 900);
   const after = snapshot('after-quiet');
-  let opposite;
   const workingLamp = frame => frame.lamps.find(e => e.path.includes('ct-session-working'));
-  for (let i = 0; i < 3; i++) {await pause(220); const frame = snapshot('phase-' + i); if (workingLamp(frame)?.opacity !== workingLamp(after)?.opacity) {opposite = frame; break;}}
+  let opposite = workingLamp(before)?.opacity !== workingLamp(after)?.opacity ? before : undefined;
+  for (let i = 0; !opposite && i < 5; i++) {
+    await pause(110 + 55 * i);
+    const frame = snapshot('phase-' + i);
+    if (workingLamp(frame)?.opacity !== workingLamp(after)?.opacity) opposite = frame;
+  }
   assert(opposite && workingLamp(opposite) && workingLamp(after));
   assert.equal(after.identity.focused, evidence.ids.client); assert.equal(opposite.identity.focused, evidence.ids.client);
   evidence.passed.push('Actual sidebar has host-driven alternating opacity frames over an 8s real wall-clock interval with no ctl; companion client retains focus');
@@ -215,6 +219,8 @@ try {
   const stopped = await quiet('no-running-rows', 1600);
   assert(!stopped.some(e => ['tick','render_return'].includes(e.event)), 'no idle animation heartbeat');
   click('[data-role="codex-tern.sessions.new"]');
+  await wait(() => tree('[placeholder="Choose a session engine"]').length === 1, 'session engine picker');
+  key('Enter');
   await wait(() => text('[data-role="omp.welcome"]').length > 0, 'new session');
   evidence.passed.push('Stop cancels host heartbeat; new-session button still opens a blank conversation');
   // Reload the actual host/window halves in the private fixture catalog only.

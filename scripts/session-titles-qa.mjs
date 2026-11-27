@@ -110,6 +110,8 @@ try {
 
   await unlink(release);
   click('[data-role="codex-tern.sessions.new"]');
+  await wait(() => tree('[placeholder="Choose a session engine"]').length === 1, 'session engine picker');
+  key('Enter');
   await wait(() => tree('[data-role="omp.composer.stop"]').length === 0, 'new session');
   const second = 'hold 手动命名优先';
   click(editor); type(second); key('Enter');

@@ -15,7 +15,7 @@ The native node layouts in `src/omp-views.tsx` and `src/ui.tsx` are adapted from
 - `packages/tui/src/status-line/footer.ts` — compact status segments.
 The client directly imports `Editor`, `CombinedAutocompleteProvider`, native node types, and editor theme adapters from **`@oh-my-pi/pi-tui` 18.12.5**. Their editing logic, keybindings, word navigation, kill ring, Vim modes, and completion components execute unchanged under Bun. `src/draft.ts` and `src/omp-native.ts` bridge the official Tern SDK to those original components.
 
-The `omp.*` roles select styles already built into the installed Tern application. No Tern application CSS is bundled or redistributed. The client still identifies itself to Codex as `codex-tern`; no OMP agent runtime, prompts, or model behavior is used. The independent `@oh-my-pi/pi-natives` package supplies system clipboard reads through its platform N-API library. `src/clipboard/system.ts` uses its clipboard module under Bun and reads macOS file references through the built-in AppKit bridge.
+The `omp.*` roles select styles already built into the installed Tern application. No Tern application CSS is bundled or redistributed. The client still identifies itself to Codex as `codex-tern`. The styling roles do not start an agent. Selecting omp connects to a separately installed omp executable via its JSONL RPC. The independent `@oh-my-pi/pi-natives` package supplies system clipboard reads through its platform N-API library. `src/clipboard/system.ts` uses its clipboard module under Bun and reads macOS file references through the built-in AppKit bridge.
 
 MIT License
 
